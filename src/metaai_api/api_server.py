@@ -43,6 +43,7 @@ class ChatRequest(BaseModel):
     message: str
     stream: bool = False
     new_conversation: bool = False
+    thinking_mode: bool = True
     media_ids: Optional[list] = None
     attachment_metadata: Optional[dict] = None
 
@@ -164,6 +165,7 @@ async def chat(req: ChatRequest, _=Depends(verify_api_key)):
             req.message,
             stream=req.stream,
             new_conversation=req.new_conversation,
+            thinking_mode=req.thinking_mode,
             media_ids=req.media_ids,
             attachment_metadata=req.attachment_metadata,
         )

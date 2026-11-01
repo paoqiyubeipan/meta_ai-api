@@ -161,6 +161,10 @@ See [CHANGES_AND_COOKIES.md](CHANGES_AND_COOKIES.md) for details on cookie expir
 | `/reset` | POST | Reset browser session | ✅ |
 | `/docs` | GET | Swagger UI | ✅ |
 
+### Chat thinking mode
+
+Both `ai.prompt()` and `POST /chat` use Thinking mode by default. To use Instant mode, pass `thinking_mode=False` in the SDK or include `"thinking_mode": false` in the REST request body. Omitting the field keeps Thinking enabled.
+
 ## How It Works
 
 Meta AI uses a custom WebSocket protocol called **DGW (Datagram WebSocket)** for image generation and chat. The server validates message integrity, so you can't construct valid messages from scratch in Python.

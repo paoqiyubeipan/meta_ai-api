@@ -245,7 +245,7 @@ class MetaAI:
         is_image_generation: bool = False,
         orientation: Optional[str] = None,
         timeout: int = 60,
-        thinking_mode: bool = False,
+        thinking_mode: bool = True,
         **kwargs,
     ) -> Union[Dict, Generator[Dict, None, None]]:
         """Send a chat prompt to Meta AI.
@@ -261,7 +261,7 @@ class MetaAI:
             is_image_generation: Whether this is an image generation request.
             orientation: Image orientation (for image generation).
             timeout: Max seconds to wait.
-            thinking_mode: If True, uses Thinking mode for longer reasoning.
+            thinking_mode: If True (the default), uses Thinking mode; False selects Instant.
 
         Returns:
             Dictionary with 'message', 'conversation_id', etc.
