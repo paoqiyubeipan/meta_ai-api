@@ -18,7 +18,7 @@ Unofficial Python SDK and API server for Meta AI — generate images, chat with 
 
 Meta AI migrated from HTTP GraphQL to **DGW (Datagram WebSocket)** for all chat and image generation. The old HTTP-based methods no longer work — Meta's GraphQL schema changed (removed `RewriteOptionsInput`, `AttachmentInput`, `MentionInput`, `sendMessageStream`, and more).
 
-This version uses **browser automation** (via `agent-browser`) as the primary method, which works for ANY prompt. The browser creates valid DGW messages natively.
+This version uses **browser automation** as the primary method, which works for ANY prompt. It prefers **Playwright** (pure Python; no Node.js required) when installed and falls back to `agent-browser`. The browser creates valid DGW messages natively.
 
 ### Breaking Changes from v2.x
 - `prompt()` now uses browser automation (no more OAuth token extraction)
@@ -46,18 +46,25 @@ This version uses **browser automation** (via `agent-browser`) as the primary me
 
 ## Install
 
+This personal copy is not published to PyPI as `metaai-sdk`; that PyPI project name is already used by another package. Install this copy directly from GitHub instead. The Playwright extra is recommended for Windows, macOS, and Linux, and does not require Node.js.
+
+### Recommended: clone this repository
+
 ```bash
-pip install metaai-sdk[api,browser]
-agent-browser install  # downloads Chrome for browser automation
+git clone https://github.com/paoqiyubeipan/meta_ai-api.git
+cd meta_ai-api
+python -m pip install -e ".[api,playwright]"
+python -m playwright install chromium
 ```
 
-Or from source:
+Or install directly from GitHub without cloning:
+
 ```bash
-git clone https://github.com/mir-ashiq/metaai-api.git
-cd metaai-api
-pip install -e ".[api,browser]"
-agent-browser install
+python -m pip install "metaai-sdk[api,playwright] @ git+https://github.com/paoqiyubeipan/meta_ai-api.git"
+python -m playwright install chromium
 ```
+
+On Linux, if Chromium reports missing system libraries, run `python -m playwright install-deps chromium` (administrator privileges may be required).
 
 ## Quick Start
 
@@ -158,8 +165,8 @@ See [CHANGES_AND_COOKIES.md](CHANGES_AND_COOKIES.md) for details on cookie expir
 
 Meta AI uses a custom WebSocket protocol called **DGW (Datagram WebSocket)** for image generation and chat. The server validates message integrity, so you can't construct valid messages from scratch in Python.
 
-This SDK uses **browser automation** (via `agent-browser`) to drive a real headless Chrome browser:
-1. Launches Chrome with your cookies injected
+This SDK prefers **Playwright** (pure Python, no Node.js) when installed and falls back to `agent-browser` otherwise. The Playwright backend drives a real headless Chromium browser:
+1. Launches the browser with your cookies injected
 2. Types the prompt into the meta.ai chat input
 3. Waits for the image/response to appear
 4. Extracts URLs and text from the page
@@ -183,8 +190,8 @@ docker-compose up -d
 ### Direct
 
 ```bash
-pip install metaai-sdk[api,browser]
-agent-browser install
+python -m pip install "metaai-sdk[api,playwright] @ git+https://github.com/paoqiyubeipan/meta_ai-api.git"
+python -m playwright install chromium
 python -m metaai_api.api_server
 ```
 
