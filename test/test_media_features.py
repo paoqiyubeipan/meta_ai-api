@@ -224,6 +224,25 @@ def test_file_upload_returns_meta_id_without_local_copy(monkeypatch):
     assert "uploaded_files" not in tables
 
 
+def test_chat_rejects_unimplemented_uploaded_file_attachments(monkeypatch):
+    client_stub = SimpleNamespace(prompt=Mock())
+    monkeypatch.setattr(api_server.client_manager, "get_client", lambda: client_stub)
+    response = TestClient(api_server.app).post(
+        "/chat",
+        json={
+            "message": "Read the attached PDF",
+            "media_ids": ["meta-file-123"],
+            "attachment_metadata": {
+                "file_size": 42,
+                "mime_type": "application/pdf",
+            },
+        },
+    )
+    assert response.status_code == 501
+    assert "No chat message was sent" in response.json()["detail"]
+    client_stub.prompt.assert_not_called()
+
+
 def test_file_upload_rejects_oversized_payload_before_upstream(monkeypatch):
     client_stub = SimpleNamespace(access_token="ecto1:token", upload_file=Mock())
     monkeypatch.setattr(api_server.client_manager, "get_client", lambda: client_stub)

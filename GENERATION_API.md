@@ -27,7 +27,7 @@ curl -X POST http://localhost:8000/image \
 
 ### Verification labels
 
-**Implemented** means the code path exists. **Mock tests pass** means automated tests used fake Meta/network responses; it is not proof that the live service accepted the request. **Live E2E tested** means the whole flow was exercised against a signed-in Meta AI account. Current live checks cover text-to-image, reference-image generation, text chat (with mixed cold-start results below), health and conversation listing, one synthetic PDF upload to Meta, generated-image download from Meta's media library, and export of a Meta-generated PDF. Other routes and file formats must not be assumed live-tested.
+**Implemented** means the code path exists. **Mock tests pass** means automated tests used fake Meta/network responses; it is not proof that the live service accepted the request. **Live E2E tested** means the whole flow was exercised against a signed-in Meta AI account. Current live checks cover text-to-image, direct reference-image generation, the `/upload` → `media_id` → `/image` reference chain, text chat (with mixed cold-start results below), health and conversation listing, one synthetic PDF upload to Meta, generated-image download from Meta's media library, and export of Meta-generated PDF, DOCX and TXT files. Other routes and file formats must not be assumed live-tested.
 
 ## Text chat
 
@@ -41,7 +41,7 @@ curl -X POST http://localhost:8000/chat \
 
 ## Reference-image generation
 
-Reference-image generation (image-to-image) has been Live E2E tested. The browser composer can upload local reference images. The REST JSON endpoint accepts one or more base64 data URLs; use `/image/reference` for a normal multipart file upload. Install the `playwright` extra and Chromium. Meta AI may mount its hidden file input before the composer is ready, so the backend activates the hydrated **Add attachment** button, waits for a successful `rupload` response and an image preview, fills the editable composer itself, and clicks **Send**. It fails closed if attachment or prompt entry cannot be verified. Image-generation polling continues after the assistant's text appears, because the media URL can arrive a few seconds later. This live test does not separately certify every supported REST input form or the `/upload` → `media_ids` chain.
+Reference-image generation (image-to-image) has been Live E2E tested. The browser composer can upload local reference images. The REST JSON endpoint accepts one or more base64 data URLs; use `/image/reference` for a normal multipart file upload. Install the `playwright` extra and Chromium. Meta AI may mount its hidden file input before the composer is ready, so the backend activates the hydrated **Add attachment** button, waits for a successful `rupload` response and an image preview, fills the editable composer itself, and clicks **Send**. It fails closed if attachment or prompt entry cannot be verified. Image-generation polling continues after the assistant's text appears, because the media URL can arrive a few seconds later. The `/upload` → returned `media_id` → `/image` chain was also Live E2E tested: the image's distinctive colors and shapes appeared in the generated result. For this chain, the ID resolves to image bytes kept in this API's local cache for 24 hours; it is not a durable arbitrary Meta media ID. The live check does not separately certify every supported REST input form.
 
 ```bash
 curl -X POST http://localhost:8000/image/reference \
@@ -64,19 +64,20 @@ result = ai.generate_image_new(
 
 ## Download documents Meta AI generated
 
-A Canvas / document reply is a real file: Meta builds an A4 PDF (ReportLab) and serves it from a signed page on `*.a.metaaiusercontent.com`. The viewer embeds those bytes as base64, so this API can return the original PDF instead of re-rendering a screenshot. The list-and-download REST flow was Live E2E tested on 2026-11-02 against a signed-in account. Only PDF artifacts with an embedded payload are downloadable.
+A Canvas / document reply can be a real downloadable file. Live checks on 2026-11-02 found three supported artifact types in conversation data: PDF (`/pdf` viewer with the original PDF bytes as base64), DOCX (`/document` viewer with original DOCX ZIP bytes in a Next.js flight row), and TXT (`/document` viewer with the exact text in `TextViewer` props). The API returns these original bytes or UTF-8 text; it does not re-render a screenshot or convert the document to PDF. The REST list-and-download flow was tested against all three formats on a signed-in account. Other extensions remain unsupported unless their viewer payload is verified.
 
 ```bash
 curl 'http://localhost:8000/conversations/CONVERSATION_ID/documents'
 # -> {"success": true, "documents": [{"index": 0, "file_name": "Generated.pdf",
-#      "mime_type": "application/pdf", "artifact_uuid": "...", "asset_id": "...",
+#      "file_extension": "pdf", "mime_type": "application/pdf",
+#      "artifact_uuid": "...", "asset_id": "...",
 #      "downloadable": true,
 #      "download_url": "/conversations/CONVERSATION_ID/documents/0/download"}]}
 
 curl -L 'http://localhost:8000/conversations/CONVERSATION_ID/documents/0/download' -o generated.pdf
 ```
 
-The conversation page is read with your `metaai_session` cookies, so no browser is involved. Only `PDF` artifacts carry an embedded payload; other artifact types return **404** with an explanation, and a conversation without documents returns **404** as well. This generated-PDF export is separate from generic file upload: uploaded files are not retained locally or downloadable through `/files`.
+Choose the output extension from the listed `file_name`/`file_extension` (for example, `generated.docx` or `generated.txt`); the download response includes the matching MIME type. The conversation page and signed viewer are fetched with the API session cookies, so no browser is involved. A conversation with no supported artifacts returns **404**. This generated-document export is separate from generic file upload: uploaded files are not retained locally or downloadable through `/files`.
 
 ### Web chat attachment reading
 
@@ -148,7 +149,7 @@ curl -L 'http://localhost:8000/media/MEDIA_ITEM_ID/download?card_type=VIDEO_CARD
   -o generated-video.mp4
 ```
 
-The REST media-library lookup and generated-image download flow was Live E2E tested; media lookup and download logic also have Mock tests. The route streams only from HTTPS Meta CDN hosts. Video streaming is present in code, but video generation was unavailable in the live check, so video download is not claimed as Live E2E tested. For generated Canvas PDFs, use the document endpoints above; only PDF artifacts with an embedded PDF payload can be exported, while other artifact types return 404. Meta's separate [WhatsApp help page for file attachments](https://faq.whatsapp.com/812625134612934) lists formats and a 40 MB per-file cap for WhatsApp, but that is a WhatsApp feature and should not be assumed to describe `meta.ai`.
+The REST media-library lookup and generated-image download flow was Live E2E tested; media lookup and download logic also have Mock tests. The route streams only from HTTPS Meta CDN hosts. Video streaming is present in code, but video generation was unavailable in the live check, so video download is not claimed as Live E2E tested. For generated Canvas files, use the document endpoints above; PDF, DOCX and TXT are live-verified, while other artifact extensions are not yet supported. Meta's separate [WhatsApp help page for file attachments](https://faq.whatsapp.com/812625134612934) lists formats and a 40 MB per-file cap for WhatsApp, but that is a WhatsApp feature and should not be assumed to describe `meta.ai`.
 
 Meta's official [Meta AI help](https://www.meta.com/help/artificial-intelligence/943942350800511/) documents asking about photos, and its [text-document help](https://www.meta.com/help/artificial-intelligence/1319682792536795/) documents creating and editing text documents. These pages do not publish a supported `meta.ai` file-format list, upload API contract, maximum size, or document-download API. This project's `rupload` integration is unofficial and may change or reject particular file types.
 

@@ -32,10 +32,10 @@ This version uses **browser automation** as the primary method for chat and imag
 
 - **Text chat (`/chat`, `ai.prompt`)** — Cold-start results remain mixed. After adding bounded UI-readiness waits, an initial cohort had HTTP 500 on all three first requests (`ConnectionError`: Meta's Send button stayed disabled); same-instance retries returned 500 twice, and one retry returned 200 but the test's local answer checker then failed. A later cohort of three independent server/browser starts returned HTTP 200 with correct random-arithmetic answers on all three first requests. This inconsistency means cold-start reliability is not yet proven.
 - **Text-to-image (`/image`, `generate_image_new`)** — Live E2E tested.
-- **Reference-image generation / image-to-image (`/image/reference` and reference inputs to `/image`)** — Live E2E tested. The separate `/upload` → `media_ids` reference chain has Mock coverage, but is not separately claimed as live E2E tested.
+- **Reference-image generation / image-to-image (`/image/reference` and reference inputs to `/image`)** — Live E2E tested, including `/upload` → returned `media_id` → `/image`. The generated image retained the synthetic reference's distinctive shapes and colors. Reuse only works for images uploaded through this API while their local image cache is present (24 hours).
 - **Generic file upload (`POST /files`)** — A synthetic PDF upload to Meta was Live E2E tested. The API returns Meta's media ID and upload metadata, but does not retain a local copy or provide a download route. Other file types are not thereby verified.
 - **Generated image download (`GET /media/{card_id}/download`)** — Live E2E tested for an image from Meta's media library. The route also has Mock tests; video download has not been live-verified here.
-- **Generated PDF export (`/conversations/{id}/documents...`)** — Live E2E tested; only downloadable PDF artifacts are supported.
+- **Generated document export (`/conversations/{id}/documents...`)** — Live E2E tested for PDF, DOCX and TXT artifacts. Downloads preserve Meta's original PDF/DOCX bytes or reconstruct the exact UTF-8 text stored in its TXT viewer payload.
 - **Video generation** — Live-tested 2026-11-02; Meta declined for this account, so `/video` returns 503. Image-to-video and video extension are not implemented.
 - **Image-only upload (`POST /upload`)** — Live E2E tested; Meta returned a media ID.
 - **Health (`/healthz`) and conversation listing (`/conversations`)** — Live REST tested; both returned HTTP 200, and the conversation list grew from 41 to 42 after the test chat.
@@ -48,7 +48,7 @@ This version uses **browser automation** as the primary method for chat and imag
 - 📋 **Conversation management** — List conversations
 - 📎 **File upload** — Upload generic files to Meta's rupload handler; no local original copy is retained
 - 🔗 **Media fetching/downloading** — Get URLs or stream generated images/videos by media-library item ID, CDN filename ID, or external conversation ID
-- 📄 **Generated-document export** — List the documents a conversation produced and download the original PDF bytes
+- 📄 **Generated-document export** — List conversation artifacts and download supported PDF, DOCX and TXT outputs in their original format
 - 🔓 **No API key** — Uses your browser cookies for authentication
 - 🌐 **REST API server** — Deploy once, call from any language
 - 📦 **Python SDK** — Use as a library in your Python projects
@@ -166,11 +166,11 @@ See [CHANGES_AND_COOKIES.md](CHANGES_AND_COOKIES.md) for details on cookie expir
 | `/video/async` | POST | Async text-to-video job | Implemented; generation remains unavailable for this account |
 | `/video/jobs/{job_id}` | GET | Persisted video job status | Implemented; live verification not claimed |
 | `/video/extend` | POST | Extend a video | Not implemented (501) |
-| `/upload` | POST | Upload an image to Meta rupload | Implemented; Mock tests pass; requires access token; no separate live E2E claim |
+| `/upload` | POST | Upload an image to Meta rupload | Live E2E tested in the `/upload` → `/image` reference chain; requires access token; reusable `media_id` is resolved from this API's 24-hour local image cache |
 | `/files` | POST | Upload a generic file to Meta rupload; returns Meta's media ID and metadata only | Synthetic PDF Live E2E tested; 10 MiB API cap; requires access token; no local copy or download route |
 | `/conversations` | GET | List conversations | Live REST tested; HTTP 200 with 41 then 42 entries |
-| `/conversations/{conversation_id}/documents` | GET | List documents Meta AI generated in a conversation | Live E2E tested for generated PDF |
-| `/conversations/{conversation_id}/documents/{index}/download` | GET | Export a generated document as its original PDF | Live E2E tested; PDF artifacts only |
+| `/conversations/{conversation_id}/documents` | GET | List supported PDF, DOCX and TXT artifacts Meta AI generated in a conversation | Live E2E tested for all three formats |
+| `/conversations/{conversation_id}/documents/{index}/download` | GET | Export a generated PDF, DOCX or TXT in its original format | Live E2E tested; returns the matching MIME type and filename |
 | `/media` | POST | Resolve a media-library item, CDN filename ID, or conversation ID | Used in Live E2E generated-image download flow |
 | `/media/{card_id}/download` | GET | Stream generated media from Meta's CDN | Live E2E tested for generated image; not for video |
 | `/reset` | POST | Reset browser session | Implemented; live verification not claimed |
@@ -223,7 +223,7 @@ See [QUICK_START.md](QUICK_START.md) for a step-by-step guide.
 - **Speed**: ~30-40s per image (browser startup + generation).
 - **Region**: Meta AI isn't available in all regions.
 - **Generic file upload**: `/files` sends files through the reverse-engineered `genai_document` rupload handler, requires `META_AI_ACCESS_TOKEN`, and limits requests to 10 MiB. The API returns Meta's media ID and upload metadata only; it retains no local original and has no `GET /files/{file_id}` route. A synthetic PDF upload to Meta was Live E2E tested; other file types are not covered by that test. Meta does not publish a `meta.ai` format allowlist, size limit or upload API contract. The separate [WhatsApp file-attachment help](https://faq.whatsapp.com/812625134612934) lists formats and a 40 MB cap for WhatsApp only; those limits do not establish what `meta.ai` supports. Uploading a file here does not attach it to a chat turn or guarantee that Meta can parse it.
-- **Generated-document export (live-tested 2026-11-02)**: A document reply is a real file. Meta builds an A4 PDF with ReportLab and serves it from a signed `*.a.metaaiusercontent.com` viewer page that embeds the bytes as base64, so `/conversations/{id}/documents/{index}/download` returns the original PDF (15,518 bytes in the live run) rather than a re-rendered screenshot; text stays selectable. Only `PDF` artifacts carry that payload — other artifact types have no downloadable file and return 404.
+- **Generated-document export (live-tested 2026-11-02)**: PDF, DOCX and TXT replies all produced downloadable artifacts in real Meta conversations. Signed `*.a.metaaiusercontent.com` viewer pages carry the PDF bytes as base64, the original DOCX ZIP bytes in a Next.js flight row, and TXT content in the `TextViewer` props. `/conversations/{id}/documents/{index}/download` returns the matching file bytes and MIME type, not a screenshot or PDF conversion. The live REST check returned HTTP 200 for all three (PDF 15,518 bytes; DOCX 36,607 bytes; TXT 35 bytes) and verified the DOCX package and each probe's text. Other artifact extensions remain unsupported until their payload format is verified.
 - **Web chat attachment reading (separate UI test, live-tested 2026-11-02)**: Files were manually attached in a signed-in `meta.ai` web chat, not through this API. The test set included values hidden in a specific table row, sheet cell, slide or nested key. PDF (including content only on page 3), DOCX, TXT, CSV, JSON and XLSX were read and answered with the expected values. PPTX and ZIP never reached a chat: the composer's file input has no PowerPoint or archive types, and a PPTX attempt was rejected with 「サポートされていない画像フォーマットです」. This does not mean `POST /files` attaches files to `/chat`. See [GENERATION_API.md](GENERATION_API.md#web-chat-attachment-reading).
 - **Image upload**: `/upload` is image-only and validates the file signature. Its local-cache and reference-input integration has Mock coverage; a separate live E2E test of the `/upload` → `/image` `media_ids` chain is not claimed. IDs uploaded elsewhere cannot be resolved by this local cache.
 - **Generated-media download**: `/media/{card_id}/download` streams generated media from a known Meta CDN host. The generated-image download flow was Live E2E tested; video generation was unavailable during testing, so do not infer live video-download verification. Generated documents use the separate `/conversations/{id}/documents` routes above.

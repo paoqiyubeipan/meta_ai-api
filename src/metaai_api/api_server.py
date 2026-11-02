@@ -51,7 +51,7 @@ from .exceptions import (
     DocumentExportError, MetaAIError,
     TimeoutError as MetaAITimeoutError, VideoUnavailableError,
 )
-from .documents import DocumentExporter
+from .documents import DOCUMENT_MIME_TYPES, DocumentExporter
 from .utils import DEFAULT_UA
 from .image_inputs import (
     cleanup_reference_images,
@@ -382,6 +382,14 @@ async def health():
 @app.post("/chat")
 async def chat(req: ChatRequest, _=Depends(verify_api_key)):
     """Send a chat message to Meta AI."""
+    if req.media_ids or req.attachment_metadata:
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "Chat attachments are not implemented: /files media IDs are not yet "
+                "serialized into Meta AI's chat request. No chat message was sent."
+            ),
+        )
     start = time.time()
     try:
         client = client_manager.get_client()
@@ -645,13 +653,16 @@ def _document_exporter(client) -> DocumentExporter:
 
 @app.get("/conversations/{conversation_id}/documents")
 async def list_generated_documents(conversation_id: str, _=Depends(verify_api_key)):
-    """List PDF documents Meta AI generated inside one conversation."""
+    """List supported documents Meta AI generated inside one conversation."""
     try:
         client = client_manager.get_client()
         documents = await run_in_threadpool(
             _document_exporter(client).list_documents, conversation_id
         )
-        exportable = [doc for doc in documents if doc.get("file_extension") == "pdf"]
+        exportable = [
+            doc for doc in documents
+            if doc.get("file_extension") in DOCUMENT_MIME_TYPES
+        ]
         return {
             "success": True,
             "conversation_id": conversation_id,
@@ -681,7 +692,7 @@ async def list_generated_documents(conversation_id: str, _=Depends(verify_api_ke
 async def download_generated_document(
     conversation_id: str, index: int, _=Depends(verify_api_key)
 ):
-    """Export a Meta AI generated document as its original PDF bytes."""
+    """Export a Meta AI generated document in its original supported format."""
     if index < 0:
         raise HTTPException(status_code=404, detail="Document index must be zero or higher")
     try:
@@ -691,13 +702,16 @@ async def download_generated_document(
         )
     except Exception as e:
         handle_error(e, 60)
-    filename = Path(result["file_name"] or "generated.pdf").name
+    extension = result.get("file_extension") or "pdf"
+    if extension not in DOCUMENT_MIME_TYPES:
+        raise HTTPException(status_code=404, detail="Unsupported Meta AI document format")
+    filename = Path(result["file_name"] or f"generated.{extension}").name
     filename = filename.replace("\r", "").replace("\n", "")
     if not Path(filename).suffix:
-        filename += ".pdf"
+        filename += f".{extension}"
     return Response(
         content=result["file_bytes"],
-        media_type="application/pdf",
+        media_type=result.get("mime_type") or DOCUMENT_MIME_TYPES[extension],
         headers={
             "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename, safe='')}",
             "X-Content-Type-Options": "nosniff",
