@@ -53,19 +53,12 @@ class SQLiteStateStore:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS video_jobs_status_idx ON video_jobs(status)"
             )
+            # Remove the retired generic-file cache from databases created by older versions.
+            connection.execute("DROP TABLE IF EXISTS uploaded_files")
             connection.execute(
                 """CREATE TABLE IF NOT EXISTS uploaded_images (
                     media_id TEXT PRIMARY KEY,
                     image_bytes BLOB NOT NULL,
-                    mime_type TEXT NOT NULL,
-                    file_name TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                )"""
-            )
-            connection.execute(
-                """CREATE TABLE IF NOT EXISTS uploaded_files (
-                    file_id TEXT PRIMARY KEY,
-                    file_bytes BLOB NOT NULL,
                     mime_type TEXT NOT NULL,
                     file_name TEXT NOT NULL,
                     created_at TEXT NOT NULL
@@ -187,40 +180,6 @@ class SQLiteStateStore:
             return None
         return {
             "image_bytes": bytes(row["image_bytes"]),
-            "mime_type": row["mime_type"],
-            "file_name": row["file_name"],
-        }
-
-    def save_uploaded_file(
-        self, file_id: str, file_bytes: bytes, mime_type: str, file_name: str
-    ) -> None:
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-        with self._connect() as connection:
-            connection.execute("DELETE FROM uploaded_files WHERE created_at < ?", (cutoff,))
-            connection.execute(
-                """INSERT INTO uploaded_files (file_id, file_bytes, mime_type, file_name, created_at)
-                   VALUES (?, ?, ?, ?, ?)
-                   ON CONFLICT(file_id) DO UPDATE SET
-                     file_bytes = excluded.file_bytes,
-                     mime_type = excluded.mime_type,
-                     file_name = excluded.file_name,
-                     created_at = excluded.created_at""",
-                (file_id, sqlite3.Binary(file_bytes), mime_type, file_name, _utc_now()),
-            )
-
-    def get_uploaded_file(self, file_id: str) -> Optional[Dict[str, Any]]:
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-        with self._connect() as connection:
-            connection.execute("DELETE FROM uploaded_files WHERE created_at < ?", (cutoff,))
-            row = connection.execute(
-                "SELECT file_bytes, mime_type, file_name FROM uploaded_files "
-                "WHERE file_id = ? AND created_at >= ?",
-                (file_id, cutoff),
-            ).fetchone()
-        if not row:
-            return None
-        return {
-            "file_bytes": bytes(row["file_bytes"]),
             "mime_type": row["mime_type"],
             "file_name": row["file_name"],
         }

@@ -11,7 +11,6 @@ Endpoints match the original metaai-api repo:
     POST /video/extend         — extend video (returns 501)
     POST /upload               — upload image to Meta rupload
     POST /files                — upload a generic file to Meta rupload
-    GET  /files/{file_id}      — download the locally cached original upload
     GET  /conversations/{conversation_id}/documents — list generated documents
     GET  /conversations/{conversation_id}/documents/{index}/download — export a document
     GET  /conversations        — list conversations
@@ -589,7 +588,7 @@ async def upload_image(file: UploadFile = File(...), _=Depends(verify_api_key)):
 
 @app.post("/files")
 async def upload_file(file: UploadFile = File(...), _=Depends(verify_api_key)):
-    """Upload a generic file to Meta AI and retain the original locally for 24 hours."""
+    """Upload a generic file to Meta AI without retaining a local copy."""
     data = await file.read(MAX_FILE_UPLOAD_BYTES + 1)
     if len(data) > MAX_FILE_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="File must be 10 MiB or smaller")
@@ -610,7 +609,6 @@ async def upload_file(file: UploadFile = File(...), _=Depends(verify_api_key)):
         file_id = result.get("media_id")
         if not file_id:
             raise GenerationError("Meta AI upload completed without returning a media_id")
-        video_job_store.save_uploaded_file(file_id, data, mime_type, filename)
         return {
             "success": True,
             "file_id": file_id,
@@ -619,32 +617,9 @@ async def upload_file(file: UploadFile = File(...), _=Depends(verify_api_key)):
             "file_name": filename,
             "file_size": len(data),
             "mime_type": mime_type,
-            "download_url": f"/files/{quote(str(file_id), safe='')}",
-            "local_copy_expires_in_hours": 24,
         }
     except Exception as e:
         handle_error(e, 60)
-
-
-@app.get("/files/{file_id}")
-def download_uploaded_file(file_id: str, _=Depends(verify_api_key)):
-    """Download the exact original uploaded through this API while its local cache exists."""
-    stored = video_job_store.get_uploaded_file(file_id)
-    if not stored:
-        raise HTTPException(
-            status_code=404,
-            detail="Uploaded file is not cached here or its 24-hour download window has expired",
-        )
-    filename = stored["file_name"].replace("\r", "").replace("\n", "")
-    return Response(
-        content=stored["file_bytes"],
-        media_type=stored["mime_type"],
-        headers={
-            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename, safe='')}",
-            "X-Content-Type-Options": "nosniff",
-            "Cache-Control": "no-store",
-        },
-    )
 
 
 @app.get("/conversations")

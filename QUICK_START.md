@@ -66,20 +66,14 @@ curl -X POST http://localhost:8000/image/reference \
   -F 'reference_image=@./reference.png'
 ```
 
-## 6. Upload a file and download its cached original
+## 6. Upload a file to Meta
 
 ```bash
 curl -X POST http://localhost:8000/files \
   -F 'file=@./report.pdf'
 ```
 
-The response contains a `file_id` and `download_url`. Download the exact original bytes retained by this API:
-
-```bash
-curl -L 'http://localhost:8000/files/FILE_ID' -o report-copy.pdf
-```
-
-The upload sends the file to Meta; the download route reads this API's local cache, which expires after 24 hours. This upload does **not** attach the file to a `/chat` message. The live end-to-end test covered a synthetic PDF; do not infer that every file type is accepted or readable by Meta.
+The response contains Meta's `file_id`/`media_id` and upload metadata. This API does not retain a local copy or provide a `GET /files/{file_id}` download route. Uploading a file here does **not** attach it to a `/chat` message, and successful upload does not guarantee Meta can read every file type. The live end-to-end test covered a synthetic PDF only.
 
 ## Verification notes
 

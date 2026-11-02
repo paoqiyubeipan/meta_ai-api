@@ -1,4 +1,5 @@
 import base64
+import sqlite3
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -190,7 +191,7 @@ def test_upload_requires_access_token(monkeypatch):
     assert response.status_code == 503
 
 
-def test_file_upload_returns_id_and_downloads_cached_original(monkeypatch):
+def test_file_upload_returns_meta_id_without_local_copy(monkeypatch):
     pdf_bytes = b"%PDF-1.7\nsynthetic test document\n"
     client_stub = SimpleNamespace(
         access_token="ecto1:token",
@@ -207,16 +208,20 @@ def test_file_upload_returns_id_and_downloads_cached_original(monkeypatch):
         "/files", files={"file": ("report.pdf", pdf_bytes, "application/pdf")}
     )
     assert uploaded.status_code == 200
-    assert uploaded.json()["file_id"] == "file-123"
-    assert uploaded.json()["download_url"] == "/files/file-123"
-    assert uploaded.json()["local_copy_expires_in_hours"] == 24
+    assert uploaded.json() == {
+        "success": True,
+        "file_id": "file-123",
+        "media_id": "file-123",
+        "upload_session_id": "upload-file-123",
+        "file_name": "report.pdf",
+        "file_size": len(pdf_bytes),
+        "mime_type": "application/pdf",
+    }
     client_stub.upload_file.assert_called_once_with(pdf_bytes, "report.pdf", "application/pdf")
-
-    downloaded = test_client.get("/files/file-123")
-    assert downloaded.status_code == 200
-    assert downloaded.content == pdf_bytes
-    assert downloaded.headers["content-type"] == "application/pdf"
-    assert "report.pdf" in downloaded.headers["content-disposition"]
+    assert test_client.get("/files/file-123").status_code == 404
+    with sqlite3.connect(api_server.video_job_store.db_path) as connection:
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert "uploaded_files" not in tables
 
 
 def test_file_upload_rejects_oversized_payload_before_upstream(monkeypatch):
@@ -230,9 +235,23 @@ def test_file_upload_rejects_oversized_payload_before_upstream(monkeypatch):
     client_stub.upload_file.assert_not_called()
 
 
-def test_file_download_returns_not_found_after_cache_miss():
-    response = TestClient(api_server.app).get("/files/not-cached")
-    assert response.status_code == 404
+def test_legacy_generic_file_cache_table_is_removed_on_startup(tmp_path):
+    db_path = tmp_path / "legacy.sqlite3"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "CREATE TABLE uploaded_files (file_id TEXT PRIMARY KEY, file_bytes BLOB)"
+        )
+        connection.execute(
+            "INSERT INTO uploaded_files VALUES (?, ?)", ("old-id", b"old local copy")
+        )
+
+    store = SQLiteStateStore(str(db_path))
+    with sqlite3.connect(db_path) as connection:
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert "uploaded_files" not in tables
+    assert "uploaded_images" in tables
+    assert not hasattr(store, "save_uploaded_file")
+    assert not hasattr(store, "get_uploaded_file")
 
 
 def test_media_library_query_resolves_cdn_filename_id_after_pagination():
@@ -655,15 +674,20 @@ def test_playwright_backend_does_not_send_when_attachment_control_is_missing():
     backend.send_message.assert_not_called()
 
 
-def test_playwright_backend_fills_editable_composer_and_clicks_send():
+def test_playwright_backend_waits_for_composer_and_send_button(monkeypatch):
+    from metaai_api import playwright_backend
+
+    monkeypatch.setattr(playwright_backend.time, "sleep", lambda _seconds: None)
     prompt = "Use the attached reference image"
 
     class FakeEditor:
         def __init__(self):
             self.text = ""
+            self.visibility_checks = 0
 
         def is_visible(self):
-            return True
+            self.visibility_checks += 1
+            return self.visibility_checks >= 2
 
         def get_attribute(self, name):
             return "true" if name == "contenteditable" else None
@@ -682,12 +706,14 @@ def test_playwright_backend_fills_editable_composer_and_clicks_send():
             self.editor = editor
             self.page = page
             self.clicked = False
+            self.enabled_checks = 0
 
         def is_visible(self):
             return True
 
         def is_enabled(self):
-            return True
+            self.enabled_checks += 1
+            return self.enabled_checks >= 3
 
         def click(self, timeout):
             assert self.editor.text == prompt
@@ -741,6 +767,8 @@ def test_playwright_backend_fills_editable_composer_and_clicks_send():
 
     assert editor.text == prompt
     assert page.send_button.clicked
+    assert editor.visibility_checks >= 2
+    assert page.send_button.enabled_checks == 3
     assert '[data-testid="composer-input"][contenteditable="true"]' in selectors
     assert backend._page.keyboard.press.call_count == 0
     assert result == {

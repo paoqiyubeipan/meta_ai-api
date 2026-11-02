@@ -274,30 +274,35 @@ class PlaywrightBackend:
             'textarea',
         ]
 
-        for selector in selectors:
-            try:
-                el = self._page.query_selector(selector)
-                if not el or not el.is_visible():
-                    continue
-                if el.get_attribute("contenteditable") == "false":
-                    continue
-                el.scroll_into_view_if_needed(timeout=5000)
+        for attempt in range(20):
+            for selector in selectors:
                 try:
-                    el.fill(prompt, timeout=5000)
-                except Exception:
-                    el.click(timeout=5000)
-                    self._page.keyboard.type(prompt, delay=30)
-                actual_text = el.evaluate(
-                    "e => e.tagName === 'TEXTAREA' ? e.value : (e.innerText || e.textContent || '')"
-                )
-                if prompt not in str(actual_text):
+                    el = self._page.query_selector(selector)
+                    if not el or not el.is_visible():
+                        continue
+                    if el.get_attribute("contenteditable") == "false":
+                        continue
+                    el.scroll_into_view_if_needed(timeout=5000)
+                    try:
+                        el.fill(prompt, timeout=5000)
+                    except Exception:
+                        el.click(timeout=5000)
+                        self._page.keyboard.type(prompt, delay=30)
+                    actual_text = el.evaluate(
+                        "e => e.tagName === 'TEXTAREA' ? e.value : (e.innerText || e.textContent || '')"
+                    )
+                    if prompt not in str(actual_text):
+                        continue
+                    typed = True
+                    logger.info(f"Filled prompt using selector: {selector}")
+                    break
+                except Exception as e:
+                    logger.debug(f"Selector {selector} failed: {e}")
                     continue
-                typed = True
-                logger.info(f"Filled prompt using selector: {selector}")
+            if typed:
                 break
-            except Exception as e:
-                logger.debug(f"Selector {selector} failed: {e}")
-                continue
+            if attempt < 19:
+                time.sleep(0.1)
 
         if not typed:
             raise ConnectionError(
@@ -308,7 +313,19 @@ class PlaywrightBackend:
             '[data-testid="composer-send-button"], button[aria-label="Send"]'
         )
         if send_button and send_button.is_visible():
-            if not send_button.is_enabled():
+            enabled = False
+            for attempt in range(20):
+                if send_button.is_enabled():
+                    enabled = True
+                    break
+                if attempt < 19:
+                    time.sleep(0.25)
+                    send_button = self._page.query_selector(
+                        '[data-testid="composer-send-button"], button[aria-label="Send"]'
+                    )
+                    if not send_button or not send_button.is_visible():
+                        break
+            if not enabled:
                 raise ConnectionError(
                     "Meta AI's Send button stayed disabled after the prompt was entered."
                 )

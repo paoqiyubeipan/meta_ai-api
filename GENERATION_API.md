@@ -27,11 +27,11 @@ curl -X POST http://localhost:8000/image \
 
 ### Verification labels
 
-**Implemented** means the code path exists. **Mock tests pass** means automated tests used fake Meta/network responses; it is not proof that the live service accepted the request. **Live E2E tested** means the whole flow was exercised against a signed-in Meta AI account. Current live checks cover text-to-image, reference-image generation, text chat (with a first-request failure caveat below), health and conversation listing, one synthetic PDF upload followed by byte-for-byte download from the local cache, generated-image download from Meta's media library, and export of a Meta-generated PDF. Other routes and file formats must not be assumed live-tested.
+**Implemented** means the code path exists. **Mock tests pass** means automated tests used fake Meta/network responses; it is not proof that the live service accepted the request. **Live E2E tested** means the whole flow was exercised against a signed-in Meta AI account. Current live checks cover text-to-image, reference-image generation, text chat (with mixed cold-start results below), health and conversation listing, one synthetic PDF upload to Meta, generated-image download from Meta's media library, and export of a Meta-generated PDF. Other routes and file formats must not be assumed live-tested.
 
 ## Text chat
 
-`POST /chat` and `ai.prompt()` are implemented. A direct SDK call returned the correct answer (`17 × 23 = 391`) in a live account test. In a separate REST test after moving the synchronous Playwright call into a thread pool, the first `POST /chat` after server startup returned HTTP 500; a retry returned HTTP 200 with the correct answer (`391 × 22 = 8602`). `/conversations` returned 41 entries before and 42 after the successful chat. The first-request failure has not been explained, so cold-start reliability is not yet established; do not treat Mock tests as proof of live reliability.
+`POST /chat` and `ai.prompt()` are implemented. Repeated live cold-start checks produced inconsistent results. After adding bounded UI-readiness waits (up to about 2 seconds for a verifiable composer and 5 seconds for the Send button), one cohort of three separate server/browser processes still returned HTTP 500 on all three first requests. The sanitized category was `ConnectionError` from the browser UI: the Send button stayed disabled. Two same-instance retries returned 500; the third received HTTP 200, but the test harness's local answer validator then raised `TypeError`, so correctness for that retry was not recorded. A later, corrected cohort of three independent server/browser cold starts returned HTTP 200 with exact answers to random arithmetic on all three first requests. The changing outcome means cold-start reliability remains unproven; the UI wait is a mitigation, not a verified root-cause fix. The synchronous Playwright call is offloaded to a worker thread, but that change alone did not explain the UI state. Do not treat Mock tests as proof of live reliability.
 
 ```bash
 curl -X POST http://localhost:8000/chat \
@@ -58,11 +58,9 @@ result = ai.generate_image_new(
 )
 ```
 
-## Upload and download files
+## Upload files to Meta
 
-`POST /files` sends the bytes through the reverse-engineered Meta `rupload` service with the `genai_document` handler and a MIME type inferred from the filename (or supplied by the multipart client). The API code can submit files such as PDF, DOC/DOCX, TXT, CSV, JSON, XLS/XLSX, PPT/PPTX and ZIP, up to **10 MiB per request**. This list describes inputs the code can attempt to send; it is not a Meta-supported-format list. A synthetic PDF was uploaded to Meta in a Live E2E test; other formats have not been live-verified through this endpoint. The 10 MiB size is this API's safety cap, not a published Meta AI limit. Meta's acceptance and ability to read a given file remain account-, region- and upstream-dependent. This route does not attach the returned ID to a chat turn.
-
-For the tested PDF flow, the API kept the exact original bytes in its local SQLite cache and `GET /files/{file_id}` returned them byte-for-byte. The cache lasts 24 hours; this endpoint downloads the local original, not a copy fetched back from Meta. IDs uploaded outside this API are not in the local cache. The route tests also cover these behaviors with Mocks, but those Mock tests alone do not establish live Meta acceptance.
+`POST /files` sends the bytes through the reverse-engineered Meta `rupload` service with the `genai_document` handler and a MIME type inferred from the filename (or supplied by the multipart client). The API code can submit files such as PDF, DOC/DOCX, TXT, CSV, JSON, XLS/XLSX, PPT/PPTX and ZIP, up to **10 MiB per request**. This list describes inputs the code can attempt to send; it is not a Meta-supported-format list. A synthetic PDF was uploaded to Meta in a Live E2E test; other formats have not been live-verified through this endpoint. The 10 MiB size is this API's safety cap, not a published Meta AI limit. Meta's acceptance and ability to read a given file remain account-, region- and upstream-dependent. This route does not attach the returned ID to a chat turn. It returns Meta's `file_id`/`media_id` and upload metadata only; it does not retain a local copy and there is no `GET /files/{file_id}` route.
 
 ## Download documents Meta AI generated
 
@@ -78,7 +76,7 @@ curl 'http://localhost:8000/conversations/CONVERSATION_ID/documents'
 curl -L 'http://localhost:8000/conversations/CONVERSATION_ID/documents/0/download' -o generated.pdf
 ```
 
-The conversation page is read with your `metaai_session` cookies, so no browser is involved. Only `PDF` artifacts carry an embedded payload; other artifact types return **404** with an explanation, and a conversation without documents returns **404** as well. `GET /files/{id}` still serves only the local copy of a file you uploaded here — the two routes are unrelated.
+The conversation page is read with your `metaai_session` cookies, so no browser is involved. Only `PDF` artifacts carry an embedded payload; other artifact types return **404** with an explanation, and a conversation without documents returns **404** as well. This generated-PDF export is separate from generic file upload: uploaded files are not retained locally or downloadable through `/files`.
 
 ### Web chat attachment reading
 
@@ -101,12 +99,10 @@ The composer's file input lists PDF, DOC/DOCX, XLS/XLSX, images, MP4/MOV, plain 
 ```bash
 curl -X POST http://localhost:8000/files \
   -F 'file=@./report.pdf'
-# response includes file_id, media_id, and download_url
-
-curl -L 'http://localhost:8000/files/FILE_ID' -o report.pdf
+# response includes Meta's file_id/media_id and upload metadata; no local copy is kept
 ```
 
-The example demonstrates file transfer plus download of this API's cached original; it is not a method for attaching the returned `file_id` to a chat message.
+This example uploads to Meta; it is not a method for attaching the returned `file_id` to a chat message. Keep your own local original if you need it later.
 
 The image-specific route remains available and still validates image signatures:
 
@@ -136,7 +132,7 @@ curl -X POST http://localhost:8000/video \
 
 For longer jobs, use `POST /video/async` and poll `GET /video/jobs/{job_id}`. Job state is stored in SQLite and survives restarts. Jobs with a saved Meta conversation ID resume polling after restart. If the process stops during submission before that ID is saved, the job is marked `interrupted` rather than resubmitted automatically, to avoid accidentally generating a duplicate.
 
-The database path defaults to `~/.local/state/metaai-api/state.sqlite3`; set `META_AI_STATE_DB` to change it. Docker Compose uses a named volume for this database. Cached original uploads are no longer available from the API after 24 hours.
+The database path defaults to `~/.local/state/metaai-api/state.sqlite3`; set `META_AI_STATE_DB` to change it. Docker Compose uses a named volume for this database. The database stores video-job state and image-reference uploads, not generic `/files` upload copies.
 
 ## Media fetching
 
