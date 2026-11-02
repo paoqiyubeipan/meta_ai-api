@@ -31,6 +31,7 @@ from typing import Any, Dict, Generator, List, Optional, Union
 
 from .browser import BrowserBackend
 from .client import MetaAIClient
+from .documents import DocumentExporter
 from .exceptions import (
     AuthenticationError, GenerationError, MetaAIError, TimeoutError,
 )
@@ -173,15 +174,54 @@ class MetaAI:
             ```
         """
         timeout = kwargs.get("timeout", 120)
+        reference_images = kwargs.get("reference_images")
         self._get_browser()  # Ensure browser is initialized
-        return self.generation_api.generate_image(prompt, timeout=timeout)
+        return self.generation_api.generate_image(
+            prompt, timeout=timeout, reference_images=reference_images
+        )
 
     def generate_image(self, prompt: str, **kwargs) -> Dict[str, Any]:
         """Alias for generate_image_new (backward compatibility)."""
         return self.generate_image_new(prompt, **kwargs)
 
+    def upload_image(self, image_data: bytes, filename: str,
+                     mime_type: Optional[str] = None) -> Dict[str, Any]:
+        """Upload an image to Meta AI and return its media ID."""
+        from .image_upload import ImageUploader
+
+        access_token = self.access_token
+        if access_token and not access_token.startswith("ecto1:"):
+            access_token = f"ecto1:{access_token}"
+        uploader = ImageUploader(
+            session=self.client.session,
+            cookies=self.cookies,
+            access_token=access_token,
+        )
+        result = uploader.upload_image_bytes(image_data, filename, mime_type)
+        if not result or not result.get("success"):
+            raise GenerationError((result or {}).get("error", "Image upload failed"))
+        return result
+
+    def upload_file(self, file_data: bytes, filename: str,
+                    mime_type: Optional[str] = None) -> Dict[str, Any]:
+        """Upload a generic file to Meta AI's document rupload handler."""
+        from .image_upload import ImageUploader
+
+        access_token = self.access_token
+        if access_token and not access_token.startswith("ecto1:"):
+            access_token = f"ecto1:{access_token}"
+        uploader = ImageUploader(
+            session=self.client.session,
+            cookies=self.cookies,
+            access_token=access_token,
+        )
+        result = uploader.upload_file_bytes(file_data, filename, mime_type)
+        if not result or not result.get("success"):
+            raise GenerationError((result or {}).get("error", "File upload failed"))
+        return result
+
     # ================================================================
-    # Video Generation (NOT AVAILABLE on Meta AI)
+    # Video Generation
     # ================================================================
 
     def generate_video_new(
@@ -194,14 +234,44 @@ class MetaAI:
     ) -> Dict[str, Any]:
         """Generate video using the new API.
 
-        NOTE: Video generation is NOT currently available on Meta AI.
-        Meta AI responds: "I can't generate videos right now."
-
-        Raises:
-            GenerationError: Video generation is not available.
+        Uses the repository's GraphQL video workflow. Image-to-video attachments
+        are not supported by the currently captured upstream request format.
         """
-        timeout = kwargs.get("timeout", 180)
-        return self.generation_api.generate_video(prompt, timeout=timeout)
+        from .video_generation import VideoGenerator
+
+        media_ids = kwargs.get("media_ids")
+        if media_ids or kwargs.get("attachment_metadata"):
+            raise GenerationError(
+                "Image-to-video is not implemented: Meta AI's web app currently declines video generation "
+                "for the tested account and exposes no image-to-video request to capture."
+            )
+        generator = VideoGenerator(cookies_dict=self.cookies)
+        if not auto_poll:
+            conversation_id = generator.create_video_generation_request(
+                prompt_text=prompt,
+                orientation=kwargs.get("orientation"),
+                verbose=False,
+            )
+            if not conversation_id:
+                raise GenerationError("Meta AI did not accept the video request.")
+            return {
+                "success": True,
+                "processing": True,
+                "conversation_id": conversation_id,
+                "prompt": prompt,
+                "video_urls": [],
+            }
+        result = generator.generate_video(
+            prompt=prompt,
+            orientation=kwargs.get("orientation"),
+            wait_before_poll=kwargs.get("wait_before_poll", 10),
+            max_attempts=kwargs.get("max_attempts", max_poll_attempts),
+            wait_seconds=poll_wait_seconds,
+            verbose=False,
+        )
+        if not result.get("success"):
+            raise GenerationError(result.get("error", "Video generation failed"))
+        return result
 
     def generate_video(self, prompt: str, **kwargs) -> Dict[str, Any]:
         """Alias for generate_video_new (backward compatibility)."""
@@ -219,14 +289,14 @@ class MetaAI:
     ) -> Dict[str, Any]:
         """Extend an existing video.
 
-        NOTE: Video generation is NOT currently available on Meta AI.
+        NOTE: This SDK has no verified request flow for Meta AI video extension yet.
 
         Raises:
-            GenerationError: Video generation is not available.
+            GenerationError: No verified extension request flow is available.
         """
         raise GenerationError(
-            "Video generation (extend) is not available on Meta AI. "
-            "Meta AI does not currently support video generation."
+            "Video extension is available in the Meta AI app but is not implemented in this SDK yet; "
+            "a verified request flow is required."
         )
 
     # ================================================================
@@ -311,16 +381,37 @@ class MetaAI:
     # ================================================================
 
     def fetch_card_media(self, card_id: str, card_type: str = "IMAGE_CARD") -> Dict[str, Any]:
-        """Fetch media URLs by card ID via HTTP GraphQL.
+        """Resolve generated media through Meta's current media-library feed.
 
         Args:
-            card_id: Card ID from meta.ai/create/{card_id}.
+            card_id: Media-library item ID, CDN filename ID, or conversation ID.
             card_type: "IMAGE_CARD" or "VIDEO_CARD".
 
         Returns:
-            GraphQL response with image/video URLs.
+            Compatibility-shaped response with the matching image/video URLs.
         """
         return self.generation_api.fetch_imagine_card_media(card_id, card_type)
+
+    # ================================================================
+    # Generated documents (Canvas / PDF)
+    # ================================================================
+
+    def document_exporter(self) -> DocumentExporter:
+        """Build an exporter that reuses this client's signed-in HTTP session."""
+        return DocumentExporter(
+            session=self.client.session,
+            cookies=self.cookies,
+            access_token=self.access_token,
+            user_agent=self.user_agent,
+        )
+
+    def list_documents(self, conversation_id: str) -> List[Dict[str, Any]]:
+        """List the documents Meta AI generated inside one conversation."""
+        return self.document_exporter().list_documents(conversation_id)
+
+    def download_document(self, conversation_id: str, index: int = 0) -> Dict[str, Any]:
+        """Return the original PDF bytes of a document Meta AI generated."""
+        return self.document_exporter().download(conversation_id, index)
 
     # ================================================================
     # DGW Frame Replay (Advanced)

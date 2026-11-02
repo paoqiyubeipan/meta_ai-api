@@ -117,8 +117,127 @@ class PlaywrightBackend:
         except Exception:
             pass
 
+    def send_message_with_images(
+        self, prompt: str, image_paths: List[str], timeout: int = 120,
+        thinking_mode: bool = False,
+    ) -> Dict[str, Any]:
+        """Attach local reference images in Meta AI's web composer, then prompt."""
+        if not self._ready:
+            self.setup()
+        self._dismiss_overlays()
+        if not image_paths:
+            return self.send_message(prompt, timeout=timeout, thinking_mode=thinking_mode)
+
+        input_selector = 'input[type="file"]'
+        inputs = self._page.query_selector_all(input_selector)
+        # The current composer may mount its hidden input before it is usable.
+        # Always activate the hydrated attachment button when present; otherwise
+        # the UI can show a local thumbnail without associating it with a sent turn.
+        button_selector = (
+            '[data-testid="composer-add-attachment-button"], '
+            'button[aria-label="Add attachment"], '
+            'button[aria-label*="attach" i]'
+        )
+        query_selector = getattr(self._page, "query_selector", None)
+        button = query_selector(button_selector) if callable(query_selector) else None
+        if not button and not inputs:
+            try:
+                self._page.wait_for_selector(
+                    button_selector, state="visible", timeout=30000
+                )
+            except Exception:
+                pass
+            button = query_selector(button_selector) if callable(query_selector) else None
+        if button:
+            try:
+                button.click(timeout=5000)
+            except Exception as exc:
+                raise ConnectionError(f"Could not open Meta AI's attachment menu: {exc}") from exc
+            try:
+                self._page.wait_for_selector(
+                    input_selector, state="attached", timeout=10000
+                )
+            except Exception:
+                # Keep compatibility with lightweight browser mocks and older
+                # Playwright versions while still checking the resulting DOM.
+                pass
+            inputs = self._page.query_selector_all(input_selector)
+        if not inputs:
+            raise ConnectionError(
+                "Meta AI's Add attachment control did not provide a file input."
+            )
+
+        try:
+            baseline_previews = len(
+                self._page.query_selector_all('img[src^="blob:"], img[src^="data:"]')
+            )
+        except Exception:
+            baseline_previews = None
+        upload_responses = []
+        response_listener = None
+        add_listener = getattr(self._page, "on", None)
+        remove_listener = getattr(self._page, "remove_listener", None)
+        if callable(add_listener):
+            def capture_upload_response(response):
+                if "rupload.meta.ai" in getattr(response, "url", ""):
+                    upload_responses.append(response)
+
+            response_listener = capture_upload_response
+            add_listener("response", response_listener)
+        last_error = None
+        try:
+            for file_input in inputs:
+                try:
+                    file_input.set_input_files(image_paths, timeout=5000)
+                    last_error = None
+                    break
+                except Exception as exc:
+                    last_error = exc
+            if last_error:
+                raise ConnectionError(f"Could not attach reference image: {last_error}")
+            if response_listener:
+                deadline = time.monotonic() + 30
+                wait_for_timeout = getattr(self._page, "wait_for_timeout", None)
+                while len(upload_responses) < len(image_paths) and time.monotonic() < deadline:
+                    if not callable(wait_for_timeout):
+                        break
+                    wait_for_timeout(100)
+                if len(upload_responses) < len(image_paths):
+                    raise ConnectionError(
+                        "Meta AI did not confirm the reference-image upload; the prompt was not sent."
+                    )
+                failed_uploads = [response.status for response in upload_responses if response.status >= 400]
+                if failed_uploads:
+                    raise ConnectionError(
+                        f"Meta AI rejected the reference-image upload (HTTP {failed_uploads[0]})."
+                    )
+        finally:
+            if response_listener and callable(remove_listener):
+                remove_listener("response", response_listener)
+        # Do not send the prompt if the current UI did not render an image
+        # preview; otherwise Meta AI may answer that no reference was attached.
+        wait_for_function = getattr(self._page, "wait_for_function", None)
+        if baseline_previews is not None and callable(wait_for_function):
+            try:
+                wait_for_function(
+                    "count => document.querySelectorAll('img[src^=\\\"blob:\\\"], "
+                    "img[src^=\\\"data:\\\"]').length >= count",
+                    arg=baseline_previews + len(image_paths),
+                    timeout=15000,
+                )
+            except Exception as exc:
+                raise ConnectionError(
+                    "Meta AI did not display the reference-image preview; the prompt was not sent."
+                ) from exc
+        else:
+            time.sleep(2)
+        return self.send_message(
+            prompt, timeout=timeout, thinking_mode=thinking_mode, expected_media=True
+        )
+
     def send_message(self, prompt: str, timeout: int = 120,
-                     thinking_mode: bool = False) -> Dict[str, Any]:
+                     thinking_mode: bool = False,
+                     expected_media: bool = False) -> Dict[str, Any]:
         """Send a prompt and return media URLs + text response."""
         if not self._ready:
             self.setup()
@@ -131,58 +250,8 @@ class PlaywrightBackend:
         # Dismiss any overlays that appeared
         self._dismiss_overlays()
 
-        # Find and fill the input — try multiple selectors
-        typed = False
-        selectors = [
-            'textarea[data-testid="composer-input"]',
-            'div[data-testid="composer-input"] [contenteditable]',
-            'textarea[placeholder*="Ask Meta"]',
-            '[role="textbox"]',
-            'textarea',
-        ]
-
-        for selector in selectors:
-            try:
-                el = self._page.query_selector(selector)
-                if el:
-                    # Scroll into view
-                    el.scroll_into_view_if_needed(timeout=5000)
-                    time.sleep(0.5)
-                    # Try clicking
-                    el.click(timeout=5000)
-                    time.sleep(0.3)
-                    # Type the prompt
-                    self._page.keyboard.type(prompt, delay=30)
-                    time.sleep(0.5)
-                    self._page.keyboard.press("Enter")
-                    typed = True
-                    logger.info(f"Typed prompt using selector: {selector}")
-                    break
-            except Exception as e:
-                logger.debug(f"Selector {selector} failed: {e}")
-                continue
-
-        if not typed:
-            # Last resort: use JavaScript to find and fill the input
-            try:
-                self._page.evaluate(f"""
-                    () => {{
-                        const ta = document.querySelector('textarea[data-testid="composer-input"]');
-                        if (ta) {{
-                            ta.focus();
-                            ta.value = {json.dumps(prompt)};
-                            ta.dispatchEvent(new Event('input', {{bubbles: true}}));
-                        }}
-                    }}
-                """)
-                time.sleep(0.5)
-                self._page.keyboard.press("Enter")
-                typed = True
-                logger.info("Typed prompt using JavaScript fallback")
-            except Exception as e:
-                raise ConnectionError(f"Could not find chat input: {e}")
-
-        # Record existing image URLs before waiting for response
+        # Snapshot existing media before submitting. A fast image result may
+        # render before the response poll starts and must still count as new.
         existing_urls: Set[str] = set()
         try:
             elements = self._page.query_selector_all('img[src], video[src], source[src], a[href]')
@@ -193,11 +262,72 @@ class PlaywrightBackend:
         except Exception:
             pass
 
+        # Prefer the editable composer itself. Descendant contenteditable nodes
+        # can be non-editable attachment thumbnails and must never receive text.
+        typed = False
+        selectors = [
+            '[data-testid="composer-input"][contenteditable="true"]',
+            'div[data-testid="composer-input"][role="textbox"]',
+            'textarea[data-testid="composer-input"]',
+            'textarea[placeholder*="Ask Meta"]',
+            '[role="textbox"]',
+            'textarea',
+        ]
+
+        for selector in selectors:
+            try:
+                el = self._page.query_selector(selector)
+                if not el or not el.is_visible():
+                    continue
+                if el.get_attribute("contenteditable") == "false":
+                    continue
+                el.scroll_into_view_if_needed(timeout=5000)
+                try:
+                    el.fill(prompt, timeout=5000)
+                except Exception:
+                    el.click(timeout=5000)
+                    self._page.keyboard.type(prompt, delay=30)
+                actual_text = el.evaluate(
+                    "e => e.tagName === 'TEXTAREA' ? e.value : (e.innerText || e.textContent || '')"
+                )
+                if prompt not in str(actual_text):
+                    continue
+                typed = True
+                logger.info(f"Filled prompt using selector: {selector}")
+                break
+            except Exception as e:
+                logger.debug(f"Selector {selector} failed: {e}")
+                continue
+
+        if not typed:
+            raise ConnectionError(
+                "Could not verify that the prompt was entered in Meta AI's composer; the prompt was not sent."
+            )
+
+        send_button = self._page.query_selector(
+            '[data-testid="composer-send-button"], button[aria-label="Send"]'
+        )
+        if send_button and send_button.is_visible():
+            if not send_button.is_enabled():
+                raise ConnectionError(
+                    "Meta AI's Send button stayed disabled after the prompt was entered."
+                )
+            send_button.click(timeout=5000)
+        else:
+            self._page.keyboard.press("Enter")
+        time.sleep(0.5)
+
         # Wait for response — only collect NEW URLs
-        urls, text = self._wait_for_response(timeout, existing_urls)
+        urls, text = self._wait_for_response(
+            timeout, existing_urls, expected_media=expected_media
+        )
         conv_id = self._get_conversation_id()
 
         return {"urls": urls, "text": text, "conversation_id": conv_id}
+
+    def send_message_for_media(self, prompt: str, timeout: int = 120) -> Dict[str, Any]:
+        """Send an image-generation prompt and wait for the media URL, not just text."""
+        return self.send_message(prompt, timeout=timeout, expected_media=True)
 
     def _switch_mode(self, mode_name: str) -> None:
         """Switch between Instant and Thinking modes."""
@@ -213,7 +343,8 @@ class PlaywrightBackend:
         except Exception:
             pass
 
-    def _wait_for_response(self, timeout: int, existing_urls: Optional[Set[str]] = None) -> Tuple[List[str], str]:
+    def _wait_for_response(self, timeout: int, existing_urls: Optional[Set[str]] = None,
+                           expected_media: bool = False) -> Tuple[List[str], str]:
         """Wait for either media URLs or text response. Only collect NEW URLs."""
         urls: Set[str] = set()
         last_text = ""
@@ -244,7 +375,7 @@ class PlaywrightBackend:
                 if text:
                     if text == last_text:
                         text_stable_count += 1
-                        if text_stable_count >= 2:
+                        if text_stable_count >= 2 and not expected_media:
                             return [], text
                     else:
                         text_stable_count = 0

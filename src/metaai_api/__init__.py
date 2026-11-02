@@ -16,6 +16,7 @@ __license__ = "MIT"
 __url__ = "https://github.com/mir-ashiq/metaai-api"
 
 from .main import MetaAI  # noqa
+from .documents import DocumentExporter  # noqa
 from .generation import GenerationAPI  # noqa
 from .exceptions import (
     MetaAIError,
@@ -26,6 +27,7 @@ from .exceptions import (
     ConnectionError,
     BrowserNotInstalledError,
     InvalidResponseError,
+    DocumentExportError,
 )
 
 __all__ = [
@@ -39,4 +41,6 @@ __all__ = [
     "ConnectionError",
     "BrowserNotInstalledError",
     "InvalidResponseError",
+    "DocumentExporter",
+    "DocumentExportError",
 ]

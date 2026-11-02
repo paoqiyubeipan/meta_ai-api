@@ -1,6 +1,6 @@
 """
-Image upload functionality for Meta AI API.
-Handles uploading images to Meta AI's rupload service.
+Image and generic file upload functionality for Meta AI API.
+Handles uploads through Meta AI's reverse-engineered rupload service.
 """
 
 import os
@@ -8,6 +8,8 @@ import uuid
 import mimetypes
 import logging
 import json
+import tempfile
+from pathlib import Path
 from typing import Dict, Any, Optional
 from urllib.parse import quote, unquote
 
@@ -30,27 +32,110 @@ class ImageUploader:
         self.session = session
         self.cookies = cookies
         self.access_token = access_token
-    
+
+    def upload_image_bytes(
+        self, image_data: bytes, filename: str, mime_type: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Upload image bytes without requiring callers to manage a temp file."""
+        if not image_data:
+            return {"success": False, "error": "Image file is empty"}
+        safe_name = filename.replace("\\", "/").rsplit("/", 1)[-1] or "image.img"
+        suffix = Path(safe_name).suffix or ".img"
+        if not (mimetypes.guess_type(filename)[0] or "").startswith("image/"):
+            suffix = {
+                "image/png": ".png",
+                "image/jpeg": ".jpg",
+                "image/webp": ".webp",
+                "image/gif": ".gif",
+            }.get(mime_type, ".jpg")
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temp:
+                temp.write(image_data)
+                temp_path = temp.name
+            result = self.upload_image(temp_path, filename=safe_name)
+            if result and result.get("success"):
+                result["file_name"] = safe_name
+                result["file_size"] = len(image_data)
+                if mime_type:
+                    result["mime_type"] = mime_type
+            return result
+        finally:
+            if temp_path:
+                try:
+                    Path(temp_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    def upload_file_bytes(
+        self, file_data: bytes, filename: str, mime_type: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Upload arbitrary file bytes through Meta AI's document rupload handler."""
+        if not file_data:
+            return {"success": False, "error": "File is empty"}
+        safe_name = filename.replace("\\", "/").rsplit("/", 1)[-1] or "upload.bin"
+        suffix = Path(safe_name).suffix or ".bin"
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temp:
+                temp.write(file_data)
+                temp_path = temp.name
+            result = self.upload_file(temp_path, mime_type=mime_type, filename=safe_name)
+            if result and result.get("success"):
+                result["file_name"] = safe_name
+                result["file_size"] = len(file_data)
+                if mime_type:
+                    result["mime_type"] = mime_type
+            return result
+        finally:
+            if temp_path:
+                try:
+                    Path(temp_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    def upload_file(
+        self, file_path: str, max_retries: int = 3, mime_type: Optional[str] = None,
+        filename: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Upload a non-empty file using Meta AI's genai_document rupload handler."""
+        return self._upload_file_path(
+            file_path, max_retries, require_image=False, mime_type_override=mime_type,
+            filename_override=filename,
+        )
+
     def upload_image(
+        self, file_path: str, max_retries: int = 3, filename: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Upload an image, retaining the legacy image-only validation."""
+        return self._upload_file_path(
+            file_path, max_retries, require_image=True, filename_override=filename
+        )
+
+    def _upload_file_path(
         self,
         file_path: str,
-        max_retries: int = 3
+        max_retries: int = 3,
+        require_image: bool = False,
+        mime_type_override: Optional[str] = None,
+        filename_override: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        Upload an image to Meta AI using the rupload protocol with OAuth authentication.
+        Upload a file to Meta AI using the rupload protocol with OAuth authentication.
         
         Args:
-            file_path: Path to the image file
+            file_path: Path to the file
             max_retries: Maximum number of retry attempts for retriable errors (default: 3)
+            require_image: Reject non-image MIME types for the legacy image route.
             
         Returns:
             Dictionary containing:
                 - success: bool - Whether the upload succeeded
-                - media_id: str - The uploaded image's media ID (use this in prompts)
+                - media_id: str - The uploaded file's media ID (further use depends on upstream support)
                 - upload_session_id: str - Unique upload session ID
                 - file_name: str - Original filename
                 - file_size: int - File size in bytes
-                - mime_type: str - MIME type of the image
+                - mime_type: str - MIME type of the uploaded file
                 - error: str - Error message if upload failed
         """
         # Validate we have the access token
@@ -64,7 +149,7 @@ class ImageUploader:
         if not self.access_token.startswith('ecto1:'):
             return {
                 "success": False,
-                "error": f"Invalid access token format. Expected 'ecto1:...' but got: {self.access_token[:20]}..."
+                "error": "Invalid access token format. Expected an ecto1-prefixed token."
             }
         
         # Validate file exists
@@ -74,17 +159,17 @@ class ImageUploader:
                 "error": f"File not found at {file_path}"
             }
         
-        filename = os.path.basename(file_path)
+        filename = Path(filename_override).name if filename_override else os.path.basename(file_path)
         file_size = os.path.getsize(file_path)
         
         # Detect MIME type
         mime_type, _ = mimetypes.guess_type(file_path)
+        mime_type = mime_type_override or mime_type
         if not mime_type:
-            # Default to image/jpeg if detection fails
-            mime_type = "image/jpeg"
+            mime_type = "image/jpeg" if require_image else "application/octet-stream"
         
-        # Validate it's an image
-        if not mime_type.startswith('image/'):
+        # Keep the legacy image method strict; generic files preserve their MIME type.
+        if require_image and not mime_type.startswith('image/'):
             return {
                 "success": False,
                 "error": f"Invalid file type: {mime_type}. Only image files are supported."
@@ -124,9 +209,6 @@ class ImageUploader:
                 }
                 
                 logger.info(f"Uploading {filename} ({file_size} bytes, {mime_type}) - attempt {attempt}/{max_retries}")
-                if attempt == 1:
-                    logger.info(f"Using OAuth with access token: {self.access_token[:30]}...")
-                
                 # Create a fresh session without cookies to avoid conflicts with OAuth header
                 upload_session = requests.Session()
                 

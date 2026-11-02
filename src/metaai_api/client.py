@@ -24,7 +24,7 @@ from .exceptions import (
 )
 from .parser import build_estab_stream_frame, parse_frame
 from .utils import (
-    DEFAULT_UA, WARMUP_MUTATION_DOC_ID, FETCH_CARD_MEDIA_DOC_ID,
+    DEFAULT_UA, WARMUP_MUTATION_DOC_ID,
     DGW_APP_ID, DGW_APP_VERSION, DGW_AUTH_TYPE, DGW_VERSION,
     DGW_UUID, DGW_TIER, DGW_APP_ORIGIN, logger,
 )
@@ -103,21 +103,19 @@ class MetaAIClient:
             return False
 
     def fetch_card_media(self, card_id: str, card_type: str = "IMAGE_CARD") -> Dict[str, Any]:
-        """Fetch media URLs by card ID via HTTP GraphQL."""
-        r = self.session.post(
-            "https://www.meta.ai/api/graphql",
-            json={"doc_id": FETCH_CARD_MEDIA_DOC_ID,
-                  "variables": {"cardId": str(card_id), "cardType": card_type}},
-            headers={
-                "User-Agent": self.user_agent,
-                "Content-Type": "application/json",
-                "Origin": "https://www.meta.ai",
-                **({"Authorization": f"ecto1:{self.access_token}"} if self.access_token else {}),
-            },
-            timeout=30,
+        """Resolve media through the current Meta media-library query."""
+        # Import lazily to avoid a module cycle: GenerationAPI uses this client
+        # for its HTTP session, while this compatibility method delegates the
+        # lookup to the current web-app query implementation.
+        from .generation import GenerationAPI
+
+        generation_api = GenerationAPI(
+            session=self.session,
+            cookies=self.cookies,
+            access_token=self.access_token,
+            user_agent=self.user_agent,
         )
-        r.raise_for_status()
-        return r.json()
+        return generation_api.fetch_imagine_card_media(card_id, card_type)
 
     def replay_frame(self, frame_b64: str, timeout: int = 90) -> Dict[str, Any]:
         """Replay a captured DGW DATA frame via WebSocket."""

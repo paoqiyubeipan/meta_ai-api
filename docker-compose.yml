@@ -9,7 +9,13 @@ services:
       - META_AI_ECTO_1_SESS=${META_AI_ECTO_1_SESS}
       - META_AI_ACCESS_TOKEN=${META_AI_ACCESS_TOKEN:-}
       - META_AI_API_KEY=${META_AI_API_KEY:-}
+      - META_AI_STATE_DB=/data/metaai.sqlite3
       - META_AI_HEADED=false
       - HOST=0.0.0.0
       - PORT=8000
     restart: unless-stopped
+    volumes:
+      - metaai-data:/data
+
+volumes:
+  metaai-data:

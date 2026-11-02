@@ -76,7 +76,8 @@ class BrowserBackend:
         logger.info("Browser backend ready")
 
     def send_message(self, prompt: str, timeout: int = 120,
-                     thinking_mode: bool = False) -> Dict[str, Any]:
+                     thinking_mode: bool = False,
+                     expected_media: bool = False) -> Dict[str, Any]:
         """Send a prompt and return media URLs + text response."""
         if not self._ready:
             self.setup()
@@ -100,10 +101,14 @@ class BrowserBackend:
         time.sleep(0.5)
         self._run("press", "Enter")
 
-        urls, text = self._wait_for_response(timeout)
+        urls, text = self._wait_for_response(timeout, expected_media=expected_media)
         conv_id = self._get_conversation_id()
 
         return {"urls": urls, "text": text, "conversation_id": conv_id}
+
+    def send_message_for_media(self, prompt: str, timeout: int = 120) -> Dict[str, Any]:
+        """Send an image-generation prompt and wait for the media URL, not just text."""
+        return self.send_message(prompt, timeout=timeout, expected_media=True)
 
     def _switch_mode(self, mode_name: str) -> None:
         """Switch between Instant and Thinking modes."""
@@ -119,7 +124,7 @@ class BrowserBackend:
         except Exception:
             pass
 
-    def _wait_for_response(self, timeout: int) -> Tuple[List[str], str]:
+    def _wait_for_response(self, timeout: int, expected_media: bool = False) -> Tuple[List[str], str]:
         """Wait for either media URLs or text response. Returns (urls, text)."""
         urls: Set[str] = set()
         last_text = ""
@@ -163,7 +168,7 @@ class BrowserBackend:
                     if isinstance(text, str) and text:
                         if text == last_text:
                             text_stable_count += 1
-                            if text_stable_count >= 2:
+                            if text_stable_count >= 2 and not expected_media:
                                 return [], text
                         else:
                             text_stable_count = 0

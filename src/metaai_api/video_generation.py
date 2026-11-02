@@ -10,10 +10,30 @@ import time
 import uuid
 import re
 from typing import Dict, List, Optional, Any, Iterator
-from requests_html import HTMLSession
-from metaai_api.utils import extract_value
+from .exceptions import VideoUnavailableError
 
 logger = logging.getLogger(__name__)
+
+# Meta AI answers video prompts with an explicit refusal when the feature is not
+# enabled for the signed-in account. Verified live (2026-11) in English and
+# Japanese UI languages. Treat it as a distinct, non-retryable outcome instead of
+# polling until the attempt budget runs out.
+VIDEO_UNAVAILABLE_MARKERS = (
+    "video generation isn't available to you",
+    "video generation is not available to you",
+    "video generation isn't available right now",
+    "video generation is currently unavailable",
+    "動画生成は現在ご利用いただけません",
+    "動画の生成は現在ご利用いただけません",
+)
+
+
+def _is_video_unavailable(text: str) -> bool:
+    """Return True when an upstream response states video generation is unavailable."""
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(marker.lower() in lowered for marker in VIDEO_UNAVAILABLE_MARKERS)
 
 class VideoGenerator:
     """
@@ -79,15 +99,20 @@ class VideoGenerator:
         Returns:
             Dictionary with 'lsd' and 'fb_dtsg' keys
         """
-        # Fetch Meta AI page with cookies
-        session = HTMLSession()
-        headers = {"cookie": cookies_str}
-        response = session.get("https://meta.ai", headers=headers)
-        
-        # Extract lsd and fb_dtsg
-        lsd = extract_value(response.text, start_str='"LSD",[],{"token":"', end_str='"')
-        fb_dtsg = extract_value(response.text, start_str='DTSGInitData",[],{"token":"', end_str='"')
-        
+        # These request tokens are embedded in the initial HTML; no JS rendering
+        # is needed to read them.
+        response = requests.get(
+            "https://www.meta.ai/",
+            headers={"cookie": cookies_str},
+            timeout=30,
+        )
+        response.raise_for_status()
+        lsd_match = re.search(r'"LSD",\[\],\{"token":"([^"\\]+)"\}', response.text)
+        dtsg_match = re.search(r'DTSGInitData",\[\],\{"token":"([^"\\]+)"\}', response.text)
+        lsd = lsd_match.group(1) if lsd_match else None
+        fb_dtsg = dtsg_match.group(1) if dtsg_match else None
+        if not lsd or not fb_dtsg:
+            raise ValueError("Meta AI did not return the LSD and fb_dtsg request tokens")
         return {
             "lsd": lsd,
             "fb_dtsg": fb_dtsg
@@ -588,10 +613,17 @@ Content-Disposition: form-data; name="doc_id"\r
             )
 
             if response.status_code == 200:
+                if _is_video_unavailable(response.text):
+                    raise VideoUnavailableError(
+                        "Meta AI reports that video generation is not available for this account.",
+                        detail="The upstream response declined the video request.",
+                    )
                 return external_conversation_id
             else:
                 return None
 
+        except VideoUnavailableError:
+            raise
         except Exception as e:
             return None
 
@@ -726,6 +758,11 @@ Content-Disposition: form-data; name="doc_id"\r
                 )
 
                 if response.status_code == 200:
+                    if _is_video_unavailable(response.text):
+                        raise VideoUnavailableError(
+                            "Meta AI reports that video generation is not available for this account.",
+                            detail="Polling stopped because the upstream response declined video generation.",
+                        )
                     # Extract video URLs from response, passing attempt info to reduce noise
                     is_final_attempt = (attempt == max_attempts)
                     video_urls = self._extract_video_urls_from_response(
@@ -746,6 +783,8 @@ Content-Disposition: form-data; name="doc_id"\r
                         logger.warning(f"[VIDEO POLLING] HTTP {response.status_code} on attempt {attempt}")
                     time.sleep(wait_seconds)
 
+            except VideoUnavailableError:
+                raise
             except Exception as e:
                 if verbose:
                     logger.error(f"[VIDEO POLLING] Error on attempt {attempt}: {e}")

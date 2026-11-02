@@ -21,6 +21,14 @@ class GenerationError(MetaAIError):
         self.detail = detail
 
 
+class VideoUnavailableError(GenerationError):
+    """Raised when Meta AI reports that video generation is not enabled for this account."""
+
+
+class DocumentExportError(MetaAIError):
+    """Raised when a Meta AI generated document cannot be resolved or downloaded."""
+
+
 class TimeoutError(MetaAIError):
     """Raised when a request times out."""
 
