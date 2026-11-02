@@ -27,6 +27,6 @@
 - `rewriteOptions`, `AttachmentInput`, `MentionInput` fields (removed by Meta)
 
 ### Known Limitations
-- Video generation is NOT available on Meta AI
+- At v1.0.0, video generation was not verified as available. In a later live check on 2026-11-02, Meta AI declined video generation for the tested account; see the current account-specific status in [README.md](README.md#current-verification-status).
 - Browser method takes ~30-40s per image
 - `ecto_1_sess` cookie expires frequently

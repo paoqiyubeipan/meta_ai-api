@@ -18,26 +18,27 @@ Unofficial Python SDK and API server for Meta AI — generate images, chat with 
 
 Meta AI uses **DGW (Datagram WebSocket)** for chat and image generation; the older send-message GraphQL methods no longer work because Meta changed that schema (including removing `RewriteOptionsInput`, `AttachmentInput`, `MentionInput`, and `sendMessageStream`). Media lookup is separate and currently uses Meta's `MediaLibraryFeed` GraphQL query.
 
-This version uses **browser automation** as the primary method, which works for ANY prompt. It prefers **Playwright** (pure Python; no Node.js required) when installed and falls back to `agent-browser`. The browser creates valid DGW messages natively.
+This version uses **browser automation** as the primary method for chat and image generation. It prefers **Playwright** (pure Python; no Node.js required) when installed and falls back to `agent-browser`. The browser creates valid DGW messages natively; see the verification notes below for what has and has not been tested against a signed-in account.
 
 ### Breaking Changes from v2.x
 - `prompt()` now uses browser automation (no more OAuth token extraction)
 - `generate_image_new()` uses browser automation
-- Text-to-video is exposed as an **experimental** legacy GraphQL workflow; Meta may reject it or have moved the feature
+- Text-to-video remains an **experimental** legacy GraphQL workflow; it currently returns 503 for the account used in live testing
 - `upload_image()` uses Meta's rupload endpoint and requires `META_AI_ACCESS_TOKEN`
 - Cookie-based auth replaces access token for primary methods
 
-### What Still Works
-- ✅ Image generation (text → image)
-- ✅ Reference-image generation through the Playwright composer (file input or base64 data URL)
-- ❌ Text-to-video: live-tested 2026-11-02 — Meta AI declines video generation for the account, so `/video` returns 503 with the upstream reason (no image-to-video, no extension)
-- ✅ Direct image upload (`/upload`, returns a media ID; this ID is not yet consumed by the composer)
-- ✅ Generic file upload (`/files`) and 24-hour local original download (`GET /files/{file_id}`; Meta acceptance varies)
-- ✅ Chat (text conversation, Instant + Thinking modes)
-- ✅ Conversation management (list, new)
-- ✅ Media fetching and direct image/video download by media-library item ID or CDN filename ID
-- ✅ Document export: download a PDF Meta AI generated in a conversation (`/conversations/{id}/documents`)
-- ✅ DGW frame replay (advanced WebSocket method)
+### Current verification status
+
+The labels below are intentionally different: **Implemented** means code is present; **Mock tests pass** means tests used mocked Meta/network responses and do not prove the live service works; **Live E2E tested** means the complete flow was exercised against a signed-in Meta AI account. A result for one route or file type does not certify every route or format.
+
+- **Text chat (`/chat`, `ai.prompt`)** — Implemented; Mock tests pass for SDK and REST request behavior. Not included in the current live end-to-end verification set.
+- **Text-to-image (`/image`, `generate_image_new`)** — Live E2E tested.
+- **Reference-image generation / image-to-image (`/image/reference` and reference inputs to `/image`)** — Live E2E tested. The separate `/upload` → `media_ids` reference chain has Mock coverage, but is not separately claimed as live E2E tested.
+- **Generic file transfer (`POST /files`, `GET /files/{file_id}`)** — Live E2E tested with a synthetic PDF: upload to Meta succeeded, and the original bytes were retrieved byte-for-byte from this server's 24-hour local cache. Other file types are not thereby verified.
+- **Generated image download (`GET /media/{card_id}/download`)** — Live E2E tested for an image from Meta's media library. The route also has Mock tests; video download has not been live-verified here.
+- **Generated PDF export (`/conversations/{id}/documents...`)** — Live E2E tested; only downloadable PDF artifacts are supported.
+- **Video generation** — Live-tested 2026-11-02; Meta declined for this account, so `/video` returns 503. Image-to-video and video extension are not implemented.
+- **Image-only upload (`POST /upload`), conversation management, DGW frame replay, and other listed routes** — Implemented; do not infer live verification from their presence in the API reference.
 
 ## Features
 
@@ -138,42 +139,42 @@ See [CHANGES_AND_COOKIES.md](CHANGES_AND_COOKIES.md) for details on cookie expir
 
 ### Python SDK
 
-| Method | Description | Status |
+| Method | Description | Verification |
 |--------|-------------|--------|
-| `ai.generate_image_new(prompt)` | Generate image from text | ✅ Works |
-| `ai.prompt(message)` | Send a chat message | ✅ Works |
-| `ai.list_conversations()` | List all conversations | ✅ Works |
-| `ai.new_conversation()` | Start a new conversation | ✅ Works |
-| `ai.fetch_card_media(media_id)` | Resolve media from Meta's current media-library feed | ✅ Works |
-| `ai.upload_file(file_bytes, filename, mime_type=None)` | Send a file to Meta's rupload handler | ⚠️ Upstream acceptance varies; requires access token |
-| `ai.replay_frame(frame_b64)` | Replay captured DGW frame (advanced) | ✅ Works |
-| `ai.warmup_conversation(conv_id)` | Register a new conversation | ✅ Works |
-| `ai.generate_video_new(prompt)` | Generate text-to-video via captured GraphQL flow | ⚠️ Experimental |
-| `ai.extend_video(media_id)` | Extend a video | ❌ Not supported |
-| `ai.close()` | Close browser session | ✅ Works |
+| `ai.generate_image_new(prompt)` | Generate image from text | Live E2E tested |
+| `ai.prompt(message)` | Send a text chat message | Implemented; Mock tests pass; not in current live E2E set |
+| `ai.list_conversations()` | List conversations | Implemented; live verification not claimed |
+| `ai.new_conversation()` | Start a new conversation | Implemented; live verification not claimed |
+| `ai.fetch_card_media(media_id)` | Resolve media from Meta's current media-library feed | REST generated-image download flow Live E2E tested; SDK method itself not separately tested live; unit tests use Mocks |
+| `ai.upload_file(file_bytes, filename, mime_type=None)` | Send a generic file to Meta's rupload handler | REST PDF upload plus local-cache download Live E2E tested; SDK method itself not separately tested live; requires access token; other formats not verified |
+| `ai.replay_frame(frame_b64)` | Replay captured DGW frame (advanced) | Implemented; live verification not claimed |
+| `ai.warmup_conversation(conv_id)` | Register a new conversation | Implemented; live verification not claimed |
+| `ai.generate_video_new(prompt)` | Legacy text-to-video flow | Live-tested refusal for this account; REST route returns 503 |
+| `ai.extend_video(media_id)` | Extend a video | Not implemented |
+| `ai.close()` | Close browser session | Implemented |
 
 ### REST API Endpoints
 
-| Endpoint | Method | Description | Status |
+| Endpoint | Method | Description | Verification |
 |----------|--------|-------------|--------|
-| `/healthz` | GET | Health check | ✅ |
-| `/chat` | POST | Send a chat message | ✅ |
-| `/image` | POST | Generate image from text | ✅ |
-| `/image/reference` | POST | Generate image from multipart reference file | ✅ |
-| `/video` | POST | Text-to-video | ❌ 503 (Meta declines for this account) |
-| `/video/async` | POST | Async text-to-video job | ⚠️ Queues, then fails with the same reason |
-| `/video/jobs/{job_id}` | GET | Persisted video job status | ✅ |
-| `/video/extend` | POST | Extend a video | ❌ 501 |
-| `/upload` | POST | Upload an image to Meta rupload | ✅ (access token required) |
-| `/files` | POST | Upload a generic file to Meta rupload | ✅ (10 MiB API cap; access token required) |
-| `/files/{file_id}` | GET | Download this API's locally cached upload original (24 hours) | ✅ |
-| `/conversations` | GET | List conversations | ✅ |
-| `/conversations/{conversation_id}/documents` | GET | List documents Meta AI generated in a conversation | ✅ (live-tested) |
-| `/conversations/{conversation_id}/documents/{index}/download` | GET | Export a generated document as its original PDF | ✅ (live-tested) |
-| `/media` | POST | Resolve a media-library item, CDN filename ID, or conversation ID | ✅ |
-| `/media/{card_id}/download` | GET | Stream generated media from Meta's CDN | ✅ |
-| `/reset` | POST | Reset browser session | ✅ |
-| `/docs` | GET | Swagger UI | ✅ |
+| `/healthz` | GET | Health check | Implemented; live verification not claimed |
+| `/chat` | POST | Send a text chat message | Implemented; Mock tests pass; not in current live E2E set |
+| `/image` | POST | Generate image from text or reference inputs | Text-to-image and reference-image flows Live E2E tested |
+| `/image/reference` | POST | Generate image from multipart reference file | Reference-image flow Live E2E tested; endpoint tests also use Mocks |
+| `/video` | POST | Text-to-video | Live-tested refusal; returns 503 for this account |
+| `/video/async` | POST | Async text-to-video job | Implemented; generation remains unavailable for this account |
+| `/video/jobs/{job_id}` | GET | Persisted video job status | Implemented; live verification not claimed |
+| `/video/extend` | POST | Extend a video | Not implemented (501) |
+| `/upload` | POST | Upload an image to Meta rupload | Implemented; Mock tests pass; requires access token; no separate live E2E claim |
+| `/files` | POST | Upload a generic file to Meta rupload | Synthetic PDF Live E2E tested; 10 MiB API cap; requires access token |
+| `/files/{file_id}` | GET | Download this API's locally cached upload original (24 hours) | Synthetic PDF returned byte-for-byte in the same Live E2E flow; not a Meta fetch-back |
+| `/conversations` | GET | List conversations | Implemented; live verification not claimed |
+| `/conversations/{conversation_id}/documents` | GET | List documents Meta AI generated in a conversation | Live E2E tested for generated PDF |
+| `/conversations/{conversation_id}/documents/{index}/download` | GET | Export a generated document as its original PDF | Live E2E tested; PDF artifacts only |
+| `/media` | POST | Resolve a media-library item, CDN filename ID, or conversation ID | Used in Live E2E generated-image download flow |
+| `/media/{card_id}/download` | GET | Stream generated media from Meta's CDN | Live E2E tested for generated image; not for video |
+| `/reset` | POST | Reset browser session | Implemented; live verification not claimed |
+| `/docs` | GET | Swagger UI | Implemented |
 
 ### Chat thinking mode
 
@@ -221,11 +222,11 @@ See [QUICK_START.md](QUICK_START.md) for a step-by-step guide.
 - **Cookie expiration**: `ecto_1_sess` expires frequently. Re-extract if requests fail.
 - **Speed**: ~30-40s per image (browser startup + generation).
 - **Region**: Meta AI isn't available in all regions.
-- **File upload/download**: `/files` sends files through the reverse-engineered `genai_document` rupload handler, requires `META_AI_ACCESS_TOKEN`, and limits requests to 10 MiB. `/files/{file_id}` downloads the original bytes cached locally for 24 hours; it does not retrieve the file from Meta. Meta does not publish a `meta.ai` format allowlist, size limit or upload API contract. The separate [WhatsApp file-attachment help](https://faq.whatsapp.com/812625134612934) lists PDF, JSON, TXT, DOC/DOCX, XLS/XLSX, PPT/PPTX and CSV up to 40 MB, but those limits do not establish what the `meta.ai` website supports. Uploading a file here does not attach it to a chat turn or guarantee that Meta can parse it.
+- **File upload/download**: `/files` sends files through the reverse-engineered `genai_document` rupload handler, requires `META_AI_ACCESS_TOKEN`, and limits requests to 10 MiB. A synthetic PDF upload to Meta followed by `GET /files/{file_id}` was Live E2E tested; the GET returns the original bytes cached locally for 24 hours, not a fetch-back from Meta. Other file types are not covered by that test. Meta does not publish a `meta.ai` format allowlist, size limit or upload API contract. The separate [WhatsApp file-attachment help](https://faq.whatsapp.com/812625134612934) lists formats and a 40 MB cap for WhatsApp only; those limits do not establish what `meta.ai` supports. Uploading a file here does not attach it to a chat turn or guarantee that Meta can parse it.
 - **Generated-document export (live-tested 2026-11-02)**: A document reply is a real file. Meta builds an A4 PDF with ReportLab and serves it from a signed `*.a.metaaiusercontent.com` viewer page that embeds the bytes as base64, so `/conversations/{id}/documents/{index}/download` returns the original PDF (15,518 bytes in the live run) rather than a re-rendered screenshot; text stays selectable. Only `PDF` artifacts carry that payload — other artifact types have no downloadable file and return 404.
-- **Document reading in chat (live-tested 2026-11-02)**: Files were attached in a signed-in `meta.ai` chat and each carried a random code plus a value hidden in a specific table row, sheet cell, slide or nested key. PDF (including content only on page 3), DOCX, TXT, CSV, JSON and XLSX were all read and answered with exactly the right values. PPTX and ZIP never reached a chat: the composer's file input has no PowerPoint or archive types, and a PPTX attempt was rejected with 「サポートされていない画像フォーマットです」. See [GENERATION_API.md](GENERATION_API.md#verified-document-reading-chat-2026-11-02).
-- **Image upload**: `/upload` remains image-only and validates the file signature. Images uploaded through this API are cached locally for 24 hours, so their `media_id` can be passed to `/image` as a reference; IDs uploaded elsewhere cannot be resolved by this local cache.
-- **Generated-media download**: `/media/{card_id}/download` streams a generated image/video from a known Meta CDN host. Generated documents use the separate `/conversations/{id}/documents` routes above.
+- **Web chat attachment reading (separate UI test, live-tested 2026-11-02)**: Files were manually attached in a signed-in `meta.ai` web chat, not through this API. The test set included values hidden in a specific table row, sheet cell, slide or nested key. PDF (including content only on page 3), DOCX, TXT, CSV, JSON and XLSX were read and answered with the expected values. PPTX and ZIP never reached a chat: the composer's file input has no PowerPoint or archive types, and a PPTX attempt was rejected with 「サポートされていない画像フォーマットです」. This does not mean `POST /files` attaches files to `/chat`. See [GENERATION_API.md](GENERATION_API.md#web-chat-attachment-reading).
+- **Image upload**: `/upload` is image-only and validates the file signature. Its local-cache and reference-input integration has Mock coverage; a separate live E2E test of the `/upload` → `/image` `media_ids` chain is not claimed. IDs uploaded elsewhere cannot be resolved by this local cache.
+- **Generated-media download**: `/media/{card_id}/download` streams generated media from a known Meta CDN host. The generated-image download flow was Live E2E tested; video generation was unavailable during testing, so do not infer live video-download verification. Generated documents use the separate `/conversations/{id}/documents` routes above.
 - **Async video jobs**: Job records survive process restarts. Jobs with a saved conversation ID resume polling; a request interrupted during submission is marked `interrupted` rather than automatically resubmitted, avoiding duplicate generation.
 
 ## Environment Variables
@@ -234,7 +235,7 @@ See [QUICK_START.md](QUICK_START.md) for a step-by-step guide.
 | `META_AI_DATR` | datr cookie (required) |
 | `META_AI_ECTO_1_SESS` | ecto_1_sess cookie (required) |
 | `META_AI_ABRA_SESS` | abra_sess cookie (optional, some regions) |
-| `META_AI_ACCESS_TOKEN` | DGW access token (for WebSocket method, optional) |
+| `META_AI_ACCESS_TOKEN` | `ecto1:` access token; required by `/upload` and `/files`, and used by advanced WebSocket methods |
 | `META_AI_API_KEY` | API key for the server (optional) |
 | `META_AI_HEADED` | Show browser window: "true" or "false" (default) |
 | `META_AI_STATE_DB` | SQLite state database path (default `~/.local/state/metaai-api/state.sqlite3`) |

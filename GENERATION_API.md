@@ -25,9 +25,13 @@ curl -X POST http://localhost:8000/image \
   -d '{"prompt":"a watercolor painting of a red panda","num_images":1}'
 ```
 
+### Verification labels
+
+**Implemented** means the code path exists. **Mock tests pass** means automated tests used fake Meta/network responses; it is not proof that the live service accepted the request. **Live E2E tested** means the whole flow was exercised against a signed-in Meta AI account. Current live E2E checks cover text-to-image, reference-image generation, one synthetic PDF upload followed by byte-for-byte download from the local cache, generated-image download from Meta's media library, and export of a Meta-generated PDF. Other routes and file formats must not be assumed live-tested.
+
 ## Reference-image generation
 
-The browser composer can upload local reference images. The REST JSON endpoint accepts one or more base64 data URLs; use `/image/reference` for a normal multipart file upload. Install the `playwright` extra and Chromium. Meta AI may mount its hidden file input before the composer is ready, so the backend activates the hydrated **Add attachment** button, waits for a successful `rupload` response and an image preview, fills the editable composer itself, and clicks **Send**. It fails closed if attachment or prompt entry cannot be verified. Image-generation polling continues after the assistant's text appears, because the media URL can arrive a few seconds later.
+Reference-image generation (image-to-image) has been Live E2E tested. The browser composer can upload local reference images. The REST JSON endpoint accepts one or more base64 data URLs; use `/image/reference` for a normal multipart file upload. Install the `playwright` extra and Chromium. Meta AI may mount its hidden file input before the composer is ready, so the backend activates the hydrated **Add attachment** button, waits for a successful `rupload` response and an image preview, fills the editable composer itself, and clicks **Send**. It fails closed if attachment or prompt entry cannot be verified. Image-generation polling continues after the assistant's text appears, because the media URL can arrive a few seconds later. This live test does not separately certify every supported REST input form or the `/upload` → `media_ids` chain.
 
 ```bash
 curl -X POST http://localhost:8000/image/reference \
@@ -46,13 +50,13 @@ result = ai.generate_image_new(
 
 ## Upload and download files
 
-`POST /files` sends a file through the same reverse-engineered Meta `rupload` service used by the image uploader, with the `genai_document` handler and a MIME type inferred from the filename (or supplied by the multipart client). The endpoint accepts files such as PDF, DOC/DOCX, TXT, CSV, JSON, XLS/XLSX, PPT/PPTX and ZIP, up to **10 MiB per request**. That size is this API's safety cap, not a published Meta AI limit. Meta's acceptance and ability to read a given file remain account-, region- and upstream-dependent; this upload route does not itself attach the returned ID to a chat turn.
+`POST /files` sends the bytes through the reverse-engineered Meta `rupload` service with the `genai_document` handler and a MIME type inferred from the filename (or supplied by the multipart client). The API code can submit files such as PDF, DOC/DOCX, TXT, CSV, JSON, XLS/XLSX, PPT/PPTX and ZIP, up to **10 MiB per request**. This list describes inputs the code can attempt to send; it is not a Meta-supported-format list. A synthetic PDF was uploaded to Meta in a Live E2E test; other formats have not been live-verified through this endpoint. The 10 MiB size is this API's safety cap, not a published Meta AI limit. Meta's acceptance and ability to read a given file remain account-, region- and upstream-dependent. This route does not attach the returned ID to a chat turn.
 
-On success, the API keeps the exact original bytes in its local SQLite cache for 24 hours. `GET /files/{file_id}` downloads that local original; it is not a fetch-back operation from Meta. IDs uploaded outside this API are not in the local cache.
+For the tested PDF flow, the API kept the exact original bytes in its local SQLite cache and `GET /files/{file_id}` returned them byte-for-byte. The cache lasts 24 hours; this endpoint downloads the local original, not a copy fetched back from Meta. IDs uploaded outside this API are not in the local cache. The route tests also cover these behaviors with Mocks, but those Mock tests alone do not establish live Meta acceptance.
 
 ## Download documents Meta AI generated
 
-A Canvas / document reply is a real file: Meta builds an A4 PDF (ReportLab) and serves it from a signed page on `*.a.metaaiusercontent.com`. The viewer embeds those bytes as base64, so this API can return the original PDF instead of re-rendering a screenshot. Live-tested on 2026-11-02 against a signed-in account.
+A Canvas / document reply is a real file: Meta builds an A4 PDF (ReportLab) and serves it from a signed page on `*.a.metaaiusercontent.com`. The viewer embeds those bytes as base64, so this API can return the original PDF instead of re-rendering a screenshot. The list-and-download REST flow was Live E2E tested on 2026-11-02 against a signed-in account. Only PDF artifacts with an embedded payload are downloadable.
 
 ```bash
 curl 'http://localhost:8000/conversations/CONVERSATION_ID/documents'
@@ -66,9 +70,9 @@ curl -L 'http://localhost:8000/conversations/CONVERSATION_ID/documents/0/downloa
 
 The conversation page is read with your `metaai_session` cookies, so no browser is involved. Only `PDF` artifacts carry an embedded payload; other artifact types return **404** with an explanation, and a conversation without documents returns **404** as well. `GET /files/{id}` still serves only the local copy of a file you uploaded here — the two routes are unrelated.
 
-### Verified document reading (chat, 2026-11-02)
+### Web chat attachment reading
 
-Tested end to end in a signed-in `meta.ai` chat, not through this API: each fixture held a random code plus one value that could only be found by locating a specific table row, sheet cell or nested key. A reply counted as a pass only when both values were exact.
+This was tested end to end by manually attaching files in a signed-in `meta.ai` web chat, not by sending an ID from this API. Each fixture held a random code plus a value that could only be found by locating a specific table row, sheet cell or nested key. A reply counted as a pass only when both values were exact. These results show what the web chat read in that test; they do not mean `POST /files` attaches files to `/chat`.
 
 | Format | Attach in composer | Read and answered correctly |
 |--------|--------------------|-----------------------------|
@@ -82,7 +86,7 @@ Tested end to end in a signed-in `meta.ai` chat, not through this API: each fixt
 | PPTX | **no** — rejected with "サポートされていない画像フォーマットです…" | not reached |
 | ZIP | **no** — no attachment preview appears | not reached |
 
-The composer's file input lists PDF, DOC/DOCX, XLS/XLSX, images, MP4/MOV, plain text and code/config files (`.txt .md .json .csv .tsv .yaml .toml .html .xml .css .js .ts .py .go .rs .sql .sh .env` and similar), but no PowerPoint or archive types. Its MIME filter rejects other files before any upload happens, so the PPTX/ZIP entries above describe what the `rupload` endpoint will carry, not what Meta AI can read. Tabular and nested data (CSV rows, XLSX cells, DOCX tables) survive into the answer, and replies arrived roughly 10-20 seconds after sending. Legacy binary `.doc`/`.xls`, scanned image-only PDFs and password-protected files remain untested.
+The composer's file input lists PDF, DOC/DOCX, XLS/XLSX, images, MP4/MOV, plain text and code/config files (`.txt .md .json .csv .tsv .yaml .toml .html .xml .css .js .ts .py .go .rs .sql .sh .env` and similar), but no PowerPoint or archive types. Its MIME filter rejects other files before any upload happens. Although this API's generic upload code can attempt to send PPTX/ZIP bytes, that does not make them attachable or readable in chat, and those upload types were not included in the live API test. Tabular and nested data (CSV rows, XLSX cells, DOCX tables) survived into the web-chat answers; replies arrived roughly 10–20 seconds after sending. Legacy binary `.doc`/`.xls`, scanned image-only PDFs and password-protected files remain untested.
 
 ```bash
 curl -X POST http://localhost:8000/files \
@@ -92,6 +96,8 @@ curl -X POST http://localhost:8000/files \
 curl -L 'http://localhost:8000/files/FILE_ID' -o report.pdf
 ```
 
+The example demonstrates file transfer plus download of this API's cached original; it is not a method for attaching the returned `file_id` to a chat message.
+
 The image-specific route remains available and still validates image signatures:
 
 ```bash
@@ -99,7 +105,7 @@ curl -X POST http://localhost:8000/upload \
   -F 'file=@./reference.png'
 ```
 
-Its returned image `media_id` can be passed to `/image` as a `media_ids` entry when the file was uploaded through this API:
+The `/upload` route and its local-cache integration have Mock tests. The returned image `media_id` can be passed to `/image` as a `media_ids` entry when the image was uploaded through this API; that specific upload-then-generate chain is not separately claimed as Live E2E tested:
 
 ```bash
 curl -X POST http://localhost:8000/image \
@@ -136,7 +142,7 @@ curl -L 'http://localhost:8000/media/MEDIA_ITEM_ID/download?card_type=VIDEO_CARD
   -o generated-video.mp4
 ```
 
-The media route resolves items through Meta's current media-library GraphQL feed and streams only from HTTPS Meta CDN hosts. For generated Canvas PDFs, use the document endpoints above; only PDF artifacts with an embedded PDF payload can be exported, while other artifact types return 404. Meta's separate [WhatsApp help page for file attachments](https://faq.whatsapp.com/812625134612934) lists PDF, JSON, TXT, DOC/DOCX, XLS/XLSX, PPT/PPTX and CSV with a 40 MB per-file cap, but that is a WhatsApp feature and should not be assumed to describe `meta.ai`.
+The REST media-library lookup and generated-image download flow was Live E2E tested; media lookup and download logic also have Mock tests. The route streams only from HTTPS Meta CDN hosts. Video streaming is present in code, but video generation was unavailable in the live check, so video download is not claimed as Live E2E tested. For generated Canvas PDFs, use the document endpoints above; only PDF artifacts with an embedded PDF payload can be exported, while other artifact types return 404. Meta's separate [WhatsApp help page for file attachments](https://faq.whatsapp.com/812625134612934) lists formats and a 40 MB per-file cap for WhatsApp, but that is a WhatsApp feature and should not be assumed to describe `meta.ai`.
 
 Meta's official [Meta AI help](https://www.meta.com/help/artificial-intelligence/943942350800511/) documents asking about photos, and its [text-document help](https://www.meta.com/help/artificial-intelligence/1319682792536795/) documents creating and editing text documents. These pages do not publish a supported `meta.ai` file-format list, upload API contract, maximum size, or document-download API. This project's `rupload` integration is unofficial and may change or reject particular file types.
 
