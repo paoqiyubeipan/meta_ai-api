@@ -58,6 +58,11 @@ from .image_inputs import (
     materialize_reference_images,
     materialize_uploaded_media_ids,
 )
+from .chat_attachments import (
+    UploadedFileCache,
+    cleanup_chat_attachments,
+    materialize_chat_attachments,
+)
 from .state_store import SQLiteStateStore
 
 logger = logging.getLogger(__name__)
@@ -70,7 +75,8 @@ class ChatRequest(BaseModel):
     new_conversation: bool = False
     thinking_mode: bool = True
     media_ids: Optional[list] = None
-    attachment_metadata: Optional[dict] = None
+    attachment_metadata: Optional[object] = None
+    attachments: Optional[list] = None
 
 class ImageRequest(BaseModel):
     prompt: str
@@ -135,6 +141,7 @@ class ClientManager:
 client_manager = ClientManager()
 video_jobs_lock = threading.Lock()
 video_job_store = SQLiteStateStore()
+uploaded_file_cache = UploadedFileCache()
 active_video_jobs: set[str] = set()
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_FILE_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -382,26 +389,37 @@ async def health():
 @app.post("/chat")
 async def chat(req: ChatRequest, _=Depends(verify_api_key)):
     """Send a chat message to Meta AI."""
-    if req.media_ids or req.attachment_metadata:
+    try:
+        media_ids = _chat_attachment_ids(req)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if (req.attachment_metadata or req.attachments) and not media_ids:
         raise HTTPException(
-            status_code=501,
-            detail=(
-                "Chat attachments are not implemented: /files media IDs are not yet "
-                "serialized into Meta AI's chat request. No chat message was sent."
-            ),
+            status_code=400,
+            detail="Chat attachment metadata must identify an uploaded media_id/file_id; no message was sent.",
         )
+    attachment_paths = []
+    if media_ids:
+        try:
+            attachment_paths = materialize_chat_attachments(
+                media_ids, uploaded_file_cache, video_job_store
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     start = time.time()
     try:
         client = client_manager.get_client()
+        prompt_kwargs = {
+            "stream": req.stream,
+            "new_conversation": req.new_conversation,
+            "thinking_mode": req.thinking_mode,
+            "media_ids": req.media_ids,
+            "attachment_metadata": req.attachment_metadata,
+        }
+        if attachment_paths:
+            prompt_kwargs["attachment_paths"] = [str(path) for path in attachment_paths]
         result = await run_in_threadpool(
-            lambda: client.prompt(
-                req.message,
-                stream=req.stream,
-                new_conversation=req.new_conversation,
-                thinking_mode=req.thinking_mode,
-                media_ids=req.media_ids,
-                attachment_metadata=req.attachment_metadata,
-            )
+            lambda: client.prompt(req.message, **prompt_kwargs)
         )
         return {
             "success": True,
@@ -411,6 +429,56 @@ async def chat(req: ChatRequest, _=Depends(verify_api_key)):
         }
     except Exception as e:
         handle_error(e, 60)
+    finally:
+        cleanup_chat_attachments(attachment_paths)
+
+
+def _chat_attachment_ids(req: ChatRequest) -> list[str]:
+    """Normalize legacy IDs and common attachment-object request shapes."""
+    ids: list[str] = []
+
+    def add(value, *, require_id: bool = True) -> None:
+        if isinstance(value, str):
+            media_id = value.strip()
+        elif isinstance(value, dict):
+            raw_id = next(
+                (value[key] for key in ("media_id", "file_id", "id") if value.get(key) is not None),
+                None,
+            )
+            if raw_id is None:
+                if require_id:
+                    raise ValueError("Chat attachment object is missing media_id/file_id/id")
+                return
+            media_id = str(raw_id).strip()
+        else:
+            raise ValueError("Each chat attachment must be an ID or an object containing media_id/file_id/id")
+        if not media_id:
+            raise ValueError("Chat attachment IDs must not be empty")
+        if len(media_id) > 512:
+            raise ValueError("Chat attachment ID is too long")
+        ids.append(media_id)
+
+    for item in req.media_ids or []:
+        add(item)
+    for item in req.attachments or []:
+        add(item)
+
+    metadata = req.attachment_metadata
+    if isinstance(metadata, list):
+        for item in metadata:
+            if isinstance(item, (str, dict)):
+                add(item)
+            else:
+                raise ValueError("attachment_metadata list items must be IDs or objects")
+    elif isinstance(metadata, dict):
+        nested = metadata.get("attachments")
+        if isinstance(nested, list):
+            for item in nested:
+                add(item)
+        elif any(key in metadata for key in ("media_id", "file_id", "id")):
+            add(metadata)
+
+    return list(dict.fromkeys(ids))
 
 
 @app.post("/image")
@@ -596,7 +664,7 @@ async def upload_image(file: UploadFile = File(...), _=Depends(verify_api_key)):
 
 @app.post("/files")
 async def upload_file(file: UploadFile = File(...), _=Depends(verify_api_key)):
-    """Upload a generic file to Meta AI without retaining a local copy."""
+    """Upload a generic file to Meta AI and cache a short-lived local copy for /chat."""
     data = await file.read(MAX_FILE_UPLOAD_BYTES + 1)
     if len(data) > MAX_FILE_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="File must be 10 MiB or smaller")
@@ -617,6 +685,7 @@ async def upload_file(file: UploadFile = File(...), _=Depends(verify_api_key)):
         file_id = result.get("media_id")
         if not file_id:
             raise GenerationError("Meta AI upload completed without returning a media_id")
+        uploaded_file_cache.save(file_id, data, mime_type, filename)
         return {
             "success": True,
             "file_id": file_id,

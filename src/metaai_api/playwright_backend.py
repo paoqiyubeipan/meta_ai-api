@@ -15,6 +15,7 @@ import json
 import logging
 import re
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .exceptions import BrowserNotInstalledError, ConnectionError
@@ -26,6 +27,8 @@ except ImportError:
     sync_playwright = None
     Browser = None
     Page = None
+
+CHAT_ATTACHMENT_PREVIEW_TIMEOUT = 15
 
 
 class PlaywrightBackend:
@@ -233,6 +236,141 @@ class PlaywrightBackend:
             time.sleep(2)
         return self.send_message(
             prompt, timeout=timeout, thinking_mode=thinking_mode, expected_media=True
+        )
+
+    def send_message_with_files(
+        self, prompt: str, file_paths: List[str], timeout: int = 120,
+        thinking_mode: bool = False,
+    ) -> Dict[str, Any]:
+        """Attach local files through Meta AI's web composer, then ask a question.
+
+        This uses the browser's native upload flow rather than guessing how an
+        uploaded rupload media ID should be serialized into a chat frame.
+        """
+        if not self._ready:
+            self.setup()
+        self._dismiss_overlays()
+        if not file_paths:
+            return self.send_message(prompt, timeout=timeout, thinking_mode=thinking_mode)
+
+        input_selector = 'input[type="file"]'
+        button_selector = (
+            '[data-testid="composer-add-attachment-button"], '
+            'button[aria-label="Add attachment"], '
+            'button[aria-label*="attach" i]'
+        )
+        query_selector = getattr(self._page, "query_selector", None)
+        inputs = self._page.query_selector_all(input_selector)
+        button = query_selector(button_selector) if callable(query_selector) else None
+        if button:
+            try:
+                button.click(timeout=5000)
+            except Exception as exc:
+                raise ConnectionError("Could not open Meta AI's attachment menu: {}".format(exc)) from exc
+            try:
+                self._page.wait_for_selector(input_selector, state="attached", timeout=10000)
+            except Exception:
+                pass
+            inputs = self._page.query_selector_all(input_selector)
+        elif not inputs:
+            try:
+                self._page.wait_for_selector(button_selector, state="visible", timeout=30000)
+            except Exception:
+                pass
+            button = query_selector(button_selector) if callable(query_selector) else None
+            if button:
+                button.click(timeout=5000)
+                try:
+                    self._page.wait_for_selector(input_selector, state="attached", timeout=10000)
+                except Exception:
+                    pass
+                inputs = self._page.query_selector_all(input_selector)
+        if not inputs:
+            raise ConnectionError(
+                "Meta AI's Add attachment control did not provide a file input; the prompt was not sent."
+            )
+
+        upload_responses = []
+        response_listener = None
+        add_listener = getattr(self._page, "on", None)
+        remove_listener = getattr(self._page, "remove_listener", None)
+        if callable(add_listener):
+            def capture_upload_response(response):
+                if "rupload.meta.ai" in getattr(response, "url", ""):
+                    upload_responses.append(response)
+
+            response_listener = capture_upload_response
+            add_listener("response", response_listener)
+        last_error = None
+        try:
+            for file_input in inputs:
+                try:
+                    file_input.set_input_files(file_paths, timeout=5000)
+                    last_error = None
+                    break
+                except Exception as exc:
+                    last_error = exc
+            if last_error:
+                raise ConnectionError(
+                    "Could not attach chat files: {}; the prompt was not sent.".format(last_error)
+                )
+            if response_listener:
+                deadline = time.monotonic() + 30
+                wait_for_timeout = getattr(self._page, "wait_for_timeout", None)
+                while len(upload_responses) < len(file_paths) and time.monotonic() < deadline:
+                    if not callable(wait_for_timeout):
+                        break
+                    wait_for_timeout(100)
+                if len(upload_responses) < len(file_paths):
+                    raise ConnectionError(
+                        "Meta AI did not confirm every file upload; the prompt was not sent."
+                    )
+                failed_uploads = [
+                    response.status for response in upload_responses
+                    if response.status >= 400
+                ]
+                if failed_uploads:
+                    raise ConnectionError(
+                        "Meta AI rejected a chat attachment (HTTP {}); the prompt was not sent.".format(
+                            failed_uploads[0]
+                        )
+                    )
+        finally:
+            if response_listener and callable(remove_listener):
+                remove_listener("response", response_listener)
+
+        # Do not submit a bare text prompt when the browser cannot show that the
+        # selected files are still associated with the composer.
+        visible_names = False
+        deadline = time.monotonic() + CHAT_ATTACHMENT_PREVIEW_TIMEOUT
+        wait_for_timeout = getattr(self._page, "wait_for_timeout", None)
+        while time.monotonic() < deadline and not visible_names:
+            try:
+                visible_names = self._page.evaluate(
+                    """names => {
+                        const body = (document.body?.innerText || '').toLowerCase();
+                        const chips = document.querySelectorAll(
+                            '[data-testid*="attachment" i], [data-testid*="file-chip" i], [aria-label*="remove attachment" i], [aria-label*="remove file" i]'
+                        ).length;
+                        return names.every(name => body.includes(name.toLowerCase())) || chips >= names.length;
+                    }""",
+                    [Path(path).name for path in file_paths],
+                )
+            except Exception:
+                # Selecting a document can navigate/re-hydrate the composer;
+                # retry after the new DOM execution context becomes available.
+                visible_names = False
+            if not visible_names:
+                if callable(wait_for_timeout):
+                    wait_for_timeout(250)
+                else:
+                    time.sleep(0.25)
+        if not visible_names:
+            raise ConnectionError(
+                "Meta AI did not show the selected files in the composer; the prompt was not sent."
+            )
+        return self.send_message(
+            prompt, timeout=timeout, thinking_mode=thinking_mode, expected_media=False
         )
 
     def send_message(self, prompt: str, timeout: int = 120,

@@ -73,7 +73,15 @@ curl -X POST http://localhost:8000/files \
   -F 'file=@./report.pdf'
 ```
 
-The response contains Meta's `file_id`/`media_id` and upload metadata. This API does not retain a local copy or provide a `GET /files/{file_id}` download route. Uploading a file here does **not** attach it to a `/chat` message, and successful upload does not guarantee Meta can read every file type. The live end-to-end test covered a synthetic PDF only.
+The response contains Meta's `file_id`/`media_id` and upload metadata. Use that `media_id` in a `/chat` request on the same API process:
+
+```bash
+curl -X POST http://localhost:8000/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"What is the unique code in the PDF? Reply only with the code.","media_ids":["MEDIA_ID_FROM_FILES"]}'
+```
+
+For this chat flow the API keeps a bounded copy in memory for up to 24 hours (16 files / 50 MiB total; each file is limited to 10 MiB). It is lost on process restart, is not downloadable, and the web composer uploads the bytes again when sending the chat. The synthetic PDF `/files` → `/chat` flow passed Live E2E; other formats are not thereby verified.
 
 ## Verification notes
 

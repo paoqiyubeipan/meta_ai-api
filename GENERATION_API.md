@@ -27,7 +27,7 @@ curl -X POST http://localhost:8000/image \
 
 ### Verification labels
 
-**Implemented** means the code path exists. **Mock tests pass** means automated tests used fake Meta/network responses; it is not proof that the live service accepted the request. **Live E2E tested** means the whole flow was exercised against a signed-in Meta AI account. Current live checks cover text-to-image, direct reference-image generation, the `/upload` → `media_id` → `/image` reference chain, text chat (with mixed cold-start results below), health and conversation listing, one synthetic PDF upload to Meta, generated-image download from Meta's media library, and export of Meta-generated PDF, DOCX and TXT files. Other routes and file formats must not be assumed live-tested.
+**Implemented** means the code path exists. **Mock tests pass** means automated tests used fake Meta/network responses; it is not proof that the live service accepted the request. **Live E2E tested** means the whole flow was exercised against a signed-in Meta AI account. Current live checks cover text-to-image, direct reference-image generation, the `/upload` → `media_id` → `/image` reference chain, text chat (with mixed cold-start results below), a synthetic PDF `/files` → `/chat` chain with an exact random-code answer, health and conversation listing, generated-image download from Meta's media library, and export of Meta-generated PDF, DOCX and TXT files. Other routes and file formats must not be assumed live-tested.
 
 ## Text chat
 
@@ -38,6 +38,20 @@ curl -X POST http://localhost:8000/chat \
   -H 'Content-Type: application/json' \
   -d '{"message":"What is 12 squared?"}'
 ```
+
+### Attach a file uploaded through `/files`
+
+`/chat` accepts legacy `media_ids`, an `attachments` list with `media_id`/`file_id`/`id`, or IDs inside `attachment_metadata`. The ID must come from `/files` or the image-only `/upload` endpoint on the **same running API process**. For generic files, the API keeps a bounded in-memory copy for up to 24 hours (16 entries and 50 MiB total; 10 MiB per file). It is not written to the database or disk and is lost when the process stops. At chat time the API materializes a short-lived, permission-restricted temporary file and attaches it through Meta AI's web composer; it does not guess a wire-format representation for the media ID.
+
+```bash
+curl -X POST http://localhost:8000/files -F 'file=@./report.pdf'
+# Copy the response's media_id into the request below.
+curl -X POST http://localhost:8000/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"What is the unique code in the attached PDF? Reply with only the code.","media_ids":["MEDIA_ID_FROM_FILES"],"attachment_metadata":{"file_name":"report.pdf","mime_type":"application/pdf"}}'
+```
+
+The browser composer uploads the retained bytes again when it submits the chat turn. The synthetic PDF `/files` → `/chat` flow has passed Live E2E with the exact code; other formats have not been verified through this API chain. Unknown, expired, or cross-process IDs return **400** without sending the prompt. A maximum of four files can be attached to one chat turn.
 
 ## Reference-image generation
 
@@ -60,7 +74,7 @@ result = ai.generate_image_new(
 
 ## Upload files to Meta
 
-`POST /files` sends the bytes through the reverse-engineered Meta `rupload` service with the `genai_document` handler and a MIME type inferred from the filename (or supplied by the multipart client). The API code can submit files such as PDF, DOC/DOCX, TXT, CSV, JSON, XLS/XLSX, PPT/PPTX and ZIP, up to **10 MiB per request**. This list describes inputs the code can attempt to send; it is not a Meta-supported-format list. A synthetic PDF was uploaded to Meta in a Live E2E test; other formats have not been live-verified through this endpoint. The 10 MiB size is this API's safety cap, not a published Meta AI limit. Meta's acceptance and ability to read a given file remain account-, region- and upstream-dependent. This route does not attach the returned ID to a chat turn. It returns Meta's `file_id`/`media_id` and upload metadata only; it does not retain a local copy and there is no `GET /files/{file_id}` route.
+`POST /files` sends the bytes through the reverse-engineered Meta `rupload` service with the `genai_document` handler and a MIME type inferred from the filename (or supplied by the multipart client). The API code can attempt to upload PDF, DOC/DOCX, TXT, CSV, JSON, XLS/XLSX, PPT/PPTX and ZIP, up to **10 MiB per request**. This is a list of inputs the code can attempt, not a Meta-supported-format list. A synthetic PDF has passed both upload and `/files` → `/chat` Live E2E tests; other formats have not been live-verified through this chain. The 10 MiB size is this API's safety cap, not a published Meta AI limit. Meta's acceptance and ability to read a given file remain account-, region- and upstream-dependent. Successful upload returns Meta's `file_id`/`media_id` and metadata, and stores a bounded in-memory copy for the chat flow (24-hour TTL, 16 files and 50 MiB total; 10 MiB per file). The bytes are not persisted to disk or the database, are lost on process restart, and cannot be downloaded from a `GET /files/{file_id}` route.
 
 ## Download documents Meta AI generated
 
@@ -77,11 +91,11 @@ curl 'http://localhost:8000/conversations/CONVERSATION_ID/documents'
 curl -L 'http://localhost:8000/conversations/CONVERSATION_ID/documents/0/download' -o generated.pdf
 ```
 
-Choose the output extension from the listed `file_name`/`file_extension` (for example, `generated.docx` or `generated.txt`); the download response includes the matching MIME type. The conversation page and signed viewer are fetched with the API session cookies, so no browser is involved. A conversation with no supported artifacts returns **404**. This generated-document export is separate from generic file upload: uploaded files are not retained locally or downloadable through `/files`.
+Choose the output extension from the listed `file_name`/`file_extension` (for example, `generated.docx` or `generated.txt`); the download response includes the matching MIME type. The conversation page and signed viewer are fetched with the API session cookies, so no browser is involved. A conversation with no supported artifacts returns **404**. This generated-document export is separate from generic file upload: uploaded originals are only kept temporarily in process memory for `/chat`, not durably stored or downloadable through `/files`.
 
 ### Web chat attachment reading
 
-This was tested end to end by manually attaching files in a signed-in `meta.ai` web chat, not by sending an ID from this API. Each fixture held a random code plus a value that could only be found by locating a specific table row, sheet cell or nested key. A reply counted as a pass only when both values were exact. These results show what the web chat read in that test; they do not mean `POST /files` attaches files to `/chat`.
+The table below is from a separate test that manually attached files in a signed-in `meta.ai` web chat. Each fixture held a random code plus a value that could only be found by locating a specific table row, sheet cell or nested key. A reply counted as a pass only when both values were exact. Separately, the API-level `/files` → `/chat` flow is Live E2E tested for a synthetic PDF: the answer matched its unique random code exactly. Other formats have not been verified through the API chain.
 
 | Format | Attach in composer | Read and answered correctly |
 |--------|--------------------|-----------------------------|
@@ -95,15 +109,18 @@ This was tested end to end by manually attaching files in a signed-in `meta.ai` 
 | PPTX | **no** — rejected with "サポートされていない画像フォーマットです…" | not reached |
 | ZIP | **no** — no attachment preview appears | not reached |
 
-The composer's file input lists PDF, DOC/DOCX, XLS/XLSX, images, MP4/MOV, plain text and code/config files (`.txt .md .json .csv .tsv .yaml .toml .html .xml .css .js .ts .py .go .rs .sql .sh .env` and similar), but no PowerPoint or archive types. Its MIME filter rejects other files before any upload happens. Although this API's generic upload code can attempt to send PPTX/ZIP bytes, that does not make them attachable or readable in chat, and those upload types were not included in the live API test. Tabular and nested data (CSV rows, XLSX cells, DOCX tables) survived into the web-chat answers; replies arrived roughly 10–20 seconds after sending. Legacy binary `.doc`/`.xls`, scanned image-only PDFs and password-protected files remain untested.
+The composer's file input lists PDF, DOC/DOCX, XLS/XLSX, images, MP4/MOV, plain text and code/config files (`.txt .md .json .csv .tsv .yaml .toml .html .xml .css .js .ts .py .go .rs .sql .sh .env` and similar), but no PowerPoint or archive types. Its MIME filter rejects other files before any upload happens. A generic `/files` upload attempt does not establish that a format can attach or be read through `/chat`; PPTX/ZIP have not been tested through the API chain and are not accepted by the observed web composer. Tabular and nested data (CSV rows, XLSX cells, DOCX tables) survived into the separate manual web-chat answers; replies arrived roughly 10–20 seconds after sending. Legacy binary `.doc`/`.xls`, scanned image-only PDFs and password-protected files remain untested.
 
 ```bash
 curl -X POST http://localhost:8000/files \
   -F 'file=@./report.pdf'
-# response includes Meta's file_id/media_id and upload metadata; no local copy is kept
+# copy media_id from the response, then use it in /chat
+curl -X POST http://localhost:8000/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"What is the unique code in the attached PDF? Reply only with the code.","media_ids":["MEDIA_ID_FROM_FILES"],"attachment_metadata":{"file_name":"report.pdf","mime_type":"application/pdf"}}'
 ```
 
-This example uploads to Meta; it is not a method for attaching the returned `file_id` to a chat message. Keep your own local original if you need it later.
+Use only an ID returned by `/files` in the same API process and before it expires; IDs from a separate process or an upload performed outside this API cannot be resolved. The `/chat` request attaches the API's in-memory file copy through the web composer, which sends those file bytes to Meta again before the prompt. Keep your own local original if you need durable storage. The older image-only `/upload` endpoint still accepts its own returned image `media_id` for reference-image generation.
 
 The image-specific route remains available and still validates image signatures:
 

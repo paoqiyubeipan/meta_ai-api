@@ -312,6 +312,7 @@ class MetaAI:
         images: Optional[list] = None,
         media_ids: Optional[list] = None,
         attachment_metadata: Optional[Dict[str, Any]] = None,
+        attachment_paths: Optional[List[str]] = None,
         is_image_generation: bool = False,
         orientation: Optional[str] = None,
         timeout: int = 60,
@@ -328,6 +329,7 @@ class MetaAI:
             images: List of image paths (not yet supported via browser).
             media_ids: List of media IDs for attachments.
             attachment_metadata: Attachment metadata.
+            attachment_paths: Local file paths to attach through the web composer.
             is_image_generation: Whether this is an image generation request.
             orientation: Image orientation (for image generation).
             timeout: Max seconds to wait.
@@ -345,6 +347,24 @@ class MetaAI:
         self._get_browser()  # Ensure browser is initialized
         if new_conversation:
             self._browser.new_chat()
+
+        if attachment_paths:
+            send_with_files = getattr(self._browser, "send_message_with_files", None)
+            if not callable(send_with_files):
+                raise GenerationError(
+                    "The configured browser backend cannot attach files to chat; no message was sent."
+                )
+            result = send_with_files(
+                message,
+                attachment_paths,
+                timeout=timeout,
+                thinking_mode=thinking_mode,
+            )
+            return {
+                "message": result.get("text", ""),
+                "conversation_id": result.get("conversation_id"),
+                "raw": result,
+            }
 
         result = self._browser.send_message(message, timeout=timeout, thinking_mode=thinking_mode)
         return {

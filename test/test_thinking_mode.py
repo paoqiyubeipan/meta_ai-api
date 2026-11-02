@@ -38,6 +38,25 @@ def test_sdk_prompt_can_select_instant():
     )
 
 
+def test_sdk_prompt_dispatches_attachment_paths_to_file_composer():
+    ai = _fake_ai()
+    ai._browser.send_message_with_files = Mock(return_value={
+        "text": "document reply",
+        "conversation_id": "conversation-with-file",
+    })
+
+    result = ai.prompt(
+        "Read the file", new_conversation=False, attachment_paths=["/tmp/report.pdf"]
+    )
+
+    ai._browser.send_message_with_files.assert_called_once_with(
+        "Read the file", ["/tmp/report.pdf"], timeout=60, thinking_mode=True
+    )
+    assert result["message"] == "document reply"
+    assert result["conversation_id"] == "conversation-with-file"
+    ai._browser.send_message.assert_not_called()
+
+
 def test_rest_chat_defaults_to_thinking(monkeypatch):
     client = Mock()
     client.prompt.return_value = {

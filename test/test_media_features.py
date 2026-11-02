@@ -14,6 +14,7 @@ from metaai_api.generation import MEDIA_LIBRARY_FEED_DOC_ID, GenerationAPI
 from metaai_api.image_upload import ImageUploader
 from metaai_api.playwright_backend import PlaywrightBackend
 from metaai_api.state_store import SQLiteStateStore
+from metaai_api.chat_attachments import UploadedFileCache
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"fake-png-payload"
 
@@ -21,6 +22,7 @@ PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"fake-png-payload"
 @pytest.fixture(autouse=True)
 def isolated_state_store(tmp_path, monkeypatch):
     monkeypatch.setattr(api_server, "video_job_store", SQLiteStateStore(str(tmp_path / "state.sqlite3")))
+    monkeypatch.setattr(api_server, "uploaded_file_cache", UploadedFileCache())
     api_server.active_video_jobs.clear()
 
 
@@ -191,7 +193,7 @@ def test_upload_requires_access_token(monkeypatch):
     assert response.status_code == 503
 
 
-def test_file_upload_returns_meta_id_without_local_copy(monkeypatch):
+def test_file_upload_returns_meta_id_and_caches_only_in_memory(monkeypatch):
     pdf_bytes = b"%PDF-1.7\nsynthetic test document\n"
     client_stub = SimpleNamespace(
         access_token="ecto1:token",
@@ -218,28 +220,109 @@ def test_file_upload_returns_meta_id_without_local_copy(monkeypatch):
         "mime_type": "application/pdf",
     }
     client_stub.upload_file.assert_called_once_with(pdf_bytes, "report.pdf", "application/pdf")
+    assert api_server.uploaded_file_cache.get("file-123") == {
+        "file_bytes": pdf_bytes,
+        "mime_type": "application/pdf",
+        "file_name": "report.pdf",
+        "file_size": len(pdf_bytes),
+    }
     assert test_client.get("/files/file-123").status_code == 404
     with sqlite3.connect(api_server.video_job_store.db_path) as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert "uploaded_files" not in tables
 
 
-def test_chat_rejects_unimplemented_uploaded_file_attachments(monkeypatch):
-    client_stub = SimpleNamespace(prompt=Mock())
+def test_files_upload_id_flows_through_chat_and_temporary_file_is_removed(monkeypatch):
+    pdf_bytes = b"%PDF-1.7\nsynthetic-only-reference\n"
+    client_stub = SimpleNamespace(
+        access_token="ecto1:token",
+        upload_file=Mock(return_value={"media_id": "meta-file-123"}),
+    )
+    observed = {}
+
+    def read_attachment(message, **kwargs):
+        from pathlib import Path
+        path = Path(kwargs["attachment_paths"][0])
+        observed["bytes"] = path.read_bytes()
+        observed["path"] = path
+        observed["kwargs"] = kwargs
+        return {"message": "The document was read", "conversation_id": "chat-file-123"}
+
+    client_stub.prompt = Mock(side_effect=read_attachment)
     monkeypatch.setattr(api_server.client_manager, "get_client", lambda: client_stub)
-    response = TestClient(api_server.app).post(
+    test_client = TestClient(api_server.app)
+
+    uploaded = test_client.post(
+        "/files", files={"file": ("synth.pdf", pdf_bytes, "application/pdf")}
+    )
+    assert uploaded.status_code == 200
+    uploaded_data = uploaded.json()
+    response = test_client.post(
         "/chat",
         json={
             "message": "Read the attached PDF",
-            "media_ids": ["meta-file-123"],
+            "media_ids": [uploaded_data["media_id"]],
             "attachment_metadata": {
-                "file_size": 42,
-                "mime_type": "application/pdf",
+                "file_name": uploaded_data["file_name"],
+                "file_size": uploaded_data["file_size"],
+                "mime_type": uploaded_data["mime_type"],
             },
         },
     )
-    assert response.status_code == 501
-    assert "No chat message was sent" in response.json()["detail"]
+    assert response.status_code == 200
+    assert response.json()["message"] == "The document was read"
+    assert observed["bytes"] == pdf_bytes
+    assert observed["path"].name.endswith("synth.pdf")
+    assert not observed["path"].exists()
+    client_stub.prompt.assert_called_once()
+
+
+def test_chat_accepts_attachment_object_with_file_id(monkeypatch):
+    api_server.uploaded_file_cache.save("object-file-1", b"synthetic", "text/plain", "note.txt")
+    client_stub = SimpleNamespace(
+        prompt=Mock(return_value={"message": "ok", "conversation_id": "c"})
+    )
+    monkeypatch.setattr(api_server.client_manager, "get_client", lambda: client_stub)
+    response = TestClient(api_server.app).post(
+        "/chat",
+        json={"message": "Read it", "attachments": [{"file_id": "object-file-1", "mime_type": "text/plain"}]},
+    )
+    assert response.status_code == 200
+    assert client_stub.prompt.call_args.kwargs["attachment_paths"]
+
+
+@pytest.mark.parametrize("attachment_fields", [
+    {"attachment_metadata": {"media_id": "metadata-file-1"}},
+    {"attachment_metadata": {"attachments": [{"id": "metadata-file-1"}]}},
+    {
+        "media_ids": ["metadata-file-1"],
+        "attachment_metadata": {"media_id": "metadata-file-1"},
+    },
+])
+def test_chat_normalizes_attachment_metadata_id_shapes(monkeypatch, attachment_fields):
+    api_server.uploaded_file_cache.save(
+        "metadata-file-1", b"synthetic", "text/plain", "metadata.txt"
+    )
+    client_stub = SimpleNamespace(
+        prompt=Mock(return_value={"message": "ok", "conversation_id": "c"})
+    )
+    monkeypatch.setattr(api_server.client_manager, "get_client", lambda: client_stub)
+    payload = {"message": "Read it", **attachment_fields}
+
+    response = TestClient(api_server.app).post("/chat", json=payload)
+
+    assert response.status_code == 200
+    assert len(client_stub.prompt.call_args.kwargs["attachment_paths"]) == 1
+
+
+def test_chat_rejects_unknown_upload_before_sending(monkeypatch):
+    client_stub = SimpleNamespace(prompt=Mock())
+    monkeypatch.setattr(api_server.client_manager, "get_client", lambda: client_stub)
+    response = TestClient(api_server.app).post(
+        "/chat", json={"message": "Read it", "media_ids": ["not-cached"]}
+    )
+    assert response.status_code == 400
+    assert "No active local upload" in response.json()["detail"]
     client_stub.prompt.assert_not_called()
 
 
@@ -672,6 +755,122 @@ def test_playwright_backend_waits_for_successful_rupload_before_sending():
     backend.send_message.assert_called_once_with(
         "make art", timeout=1, thinking_mode=False, expected_media=True
     )
+
+
+def test_playwright_backend_sends_chat_file_only_after_rupload_and_composer_confirmation():
+    class FakeResponse:
+        url = "https://rupload.meta.ai/gen_ai_document_gen_ai_tenant/session"
+        status = 200
+
+    class FakeInput:
+        def __init__(self, page):
+            self.page = page
+            self.paths = None
+
+        def set_input_files(self, paths, timeout):
+            self.paths = paths
+            self.page.upload_listener(FakeResponse())
+
+    class FakePage:
+        def __init__(self):
+            self.file_input = FakeInput(self)
+            self.upload_listener = None
+            self.removed = False
+            self.evaluated_names = None
+            self.evaluate_calls = 0
+
+        def query_selector_all(self, selector):
+            return [self.file_input] if selector == 'input[type="file"]' else []
+
+        def query_selector(self, selector):
+            return None
+
+        def on(self, event, listener):
+            assert event == "response"
+            self.upload_listener = listener
+
+        def remove_listener(self, event, listener):
+            assert event == "response"
+            self.upload_listener = None
+            self.removed = True
+
+        def wait_for_timeout(self, milliseconds):
+            pass
+
+        def evaluate(self, expression, names):
+            self.evaluate_calls += 1
+            if self.evaluate_calls == 1:
+                raise RuntimeError("navigation destroyed the old document context")
+            self.evaluated_names = names
+            return True
+
+    page = FakePage()
+    backend = object.__new__(PlaywrightBackend)
+    backend._ready = True
+    backend._page = page
+    backend._dismiss_overlays = lambda: None
+    backend.send_message = Mock(return_value={"urls": [], "text": "r7kq-41", "conversation_id": "c"})
+
+    result = backend.send_message_with_files("Find the code", ["/tmp/synth.pdf"], timeout=1)
+
+    assert page.file_input.paths == ["/tmp/synth.pdf"]
+    assert page.removed
+    assert page.evaluate_calls == 2
+    assert page.evaluated_names == ["synth.pdf"]
+    assert result["text"] == "r7kq-41"
+    backend.send_message.assert_called_once_with(
+        "Find the code", timeout=1, thinking_mode=False, expected_media=False
+    )
+
+
+def test_playwright_backend_does_not_send_chat_when_file_preview_is_missing(monkeypatch):
+    from metaai_api.exceptions import ConnectionError
+    import metaai_api.playwright_backend as playwright_backend_module
+
+    monkeypatch.setattr(playwright_backend_module, "CHAT_ATTACHMENT_PREVIEW_TIMEOUT", 0.001)
+
+    class FakeResponse:
+        url = "https://rupload.meta.ai/gen_ai_document_gen_ai_tenant/session"
+        status = 200
+
+    class FakeInput:
+        def __init__(self, page):
+            self.page = page
+
+        def set_input_files(self, paths, timeout):
+            self.page.upload_listener(FakeResponse())
+
+    class FakePage:
+        def __init__(self):
+            self.upload_listener = None
+
+        def query_selector_all(self, selector):
+            return [FakeInput(self)] if selector == 'input[type="file"]' else []
+
+        def query_selector(self, selector):
+            return None
+
+        def on(self, event, listener):
+            self.upload_listener = listener
+
+        def remove_listener(self, event, listener):
+            self.upload_listener = None
+
+        def wait_for_timeout(self, milliseconds):
+            pass
+
+        def evaluate(self, expression, names):
+            return False
+
+    backend = object.__new__(PlaywrightBackend)
+    backend._ready = True
+    backend._page = FakePage()
+    backend._dismiss_overlays = lambda: None
+    backend.send_message = Mock()
+
+    with pytest.raises(ConnectionError, match="did not show the selected files"):
+        backend.send_message_with_files("Find it", ["/tmp/synth.pdf"], timeout=1)
+    backend.send_message.assert_not_called()
 
 
 def test_playwright_backend_does_not_send_when_attachment_control_is_missing():
