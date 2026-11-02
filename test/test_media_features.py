@@ -1,7 +1,7 @@
 import base64
 import time
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 import requests
 
 from fastapi.testclient import TestClient
@@ -869,3 +869,25 @@ def test_video_route_maps_unavailability_to_503(monkeypatch):
     response = TestClient(api_server.app).post("/video", json={"prompt": "a clip"})
     assert response.status_code == 503
     assert "not available for this account" in response.json()["detail"]
+
+
+def test_chat_and_conversations_offload_sync_client_calls(monkeypatch):
+    client_stub = SimpleNamespace(
+        prompt=Mock(return_value={"message": "144", "conversation_id": "chat-1"}),
+        list_conversations=Mock(return_value=[{"id": "chat-1", "title": "Math"}]),
+    )
+    monkeypatch.setattr(api_server.client_manager, "get_client", lambda: client_stub)
+    offload = AsyncMock(wraps=api_server.run_in_threadpool)
+    monkeypatch.setattr(api_server, "run_in_threadpool", offload)
+    test_client = TestClient(api_server.app)
+
+    chat = test_client.post("/chat", json={"message": "What is 12 squared?"})
+    assert chat.status_code == 200
+    assert chat.json()["message"] == "144"
+    assert offload.await_count == 1
+
+    conversations = test_client.get("/conversations")
+    assert conversations.status_code == 200
+    assert conversations.json()["conversations"] == [{"id": "chat-1", "title": "Math"}]
+    assert offload.await_count == 2
+    assert offload.await_args_list[1].args[0] == client_stub.list_conversations

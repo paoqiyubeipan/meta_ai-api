@@ -27,7 +27,17 @@ curl -X POST http://localhost:8000/image \
 
 ### Verification labels
 
-**Implemented** means the code path exists. **Mock tests pass** means automated tests used fake Meta/network responses; it is not proof that the live service accepted the request. **Live E2E tested** means the whole flow was exercised against a signed-in Meta AI account. Current live E2E checks cover text-to-image, reference-image generation, one synthetic PDF upload followed by byte-for-byte download from the local cache, generated-image download from Meta's media library, and export of a Meta-generated PDF. Other routes and file formats must not be assumed live-tested.
+**Implemented** means the code path exists. **Mock tests pass** means automated tests used fake Meta/network responses; it is not proof that the live service accepted the request. **Live E2E tested** means the whole flow was exercised against a signed-in Meta AI account. Current live checks cover text-to-image, reference-image generation, text chat (with a first-request failure caveat below), health and conversation listing, one synthetic PDF upload followed by byte-for-byte download from the local cache, generated-image download from Meta's media library, and export of a Meta-generated PDF. Other routes and file formats must not be assumed live-tested.
+
+## Text chat
+
+`POST /chat` and `ai.prompt()` are implemented. A direct SDK call returned the correct answer (`17 × 23 = 391`) in a live account test. In a separate REST test after moving the synchronous Playwright call into a thread pool, the first `POST /chat` after server startup returned HTTP 500; a retry returned HTTP 200 with the correct answer (`391 × 22 = 8602`). `/conversations` returned 41 entries before and 42 after the successful chat. The first-request failure has not been explained, so cold-start reliability is not yet established; do not treat Mock tests as proof of live reliability.
+
+```bash
+curl -X POST http://localhost:8000/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"What is 12 squared?"}'
+```
 
 ## Reference-image generation
 

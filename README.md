@@ -29,16 +29,17 @@ This version uses **browser automation** as the primary method for chat and imag
 
 ### Current verification status
 
-The labels below are intentionally different: **Implemented** means code is present; **Mock tests pass** means tests used mocked Meta/network responses and do not prove the live service works; **Live E2E tested** means the complete flow was exercised against a signed-in Meta AI account. A result for one route or file type does not certify every route or format.
 
-- **Text chat (`/chat`, `ai.prompt`)** — Implemented; Mock tests pass for SDK and REST request behavior. Not included in the current live end-to-end verification set.
+- **Text chat (`/chat`, `ai.prompt`)** — Live REST test after the thread-pool fix: first request returned HTTP 500; a retry returned HTTP 200 with the correct answer (`391 × 22 = 8602`). The first-request failure remains unresolved, so this route is not yet verified as reliable on a cold start.
 - **Text-to-image (`/image`, `generate_image_new`)** — Live E2E tested.
 - **Reference-image generation / image-to-image (`/image/reference` and reference inputs to `/image`)** — Live E2E tested. The separate `/upload` → `media_ids` reference chain has Mock coverage, but is not separately claimed as live E2E tested.
 - **Generic file transfer (`POST /files`, `GET /files/{file_id}`)** — Live E2E tested with a synthetic PDF: upload to Meta succeeded, and the original bytes were retrieved byte-for-byte from this server's 24-hour local cache. Other file types are not thereby verified.
 - **Generated image download (`GET /media/{card_id}/download`)** — Live E2E tested for an image from Meta's media library. The route also has Mock tests; video download has not been live-verified here.
 - **Generated PDF export (`/conversations/{id}/documents...`)** — Live E2E tested; only downloadable PDF artifacts are supported.
 - **Video generation** — Live-tested 2026-11-02; Meta declined for this account, so `/video` returns 503. Image-to-video and video extension are not implemented.
-- **Image-only upload (`POST /upload`), conversation management, DGW frame replay, and other listed routes** — Implemented; do not infer live verification from their presence in the API reference.
+- **Image-only upload (`POST /upload`)** — Live E2E tested; Meta returned a media ID.
+- **Health (`/healthz`) and conversation listing (`/conversations`)** — Live REST tested; both returned HTTP 200, and the conversation list grew from 41 to 42 after the test chat.
+- **DGW frame replay and other listed routes** — Implemented; do not infer live verification from their presence in the API reference.
 
 ## Features
 
@@ -142,8 +143,8 @@ See [CHANGES_AND_COOKIES.md](CHANGES_AND_COOKIES.md) for details on cookie expir
 | Method | Description | Verification |
 |--------|-------------|--------|
 | `ai.generate_image_new(prompt)` | Generate image from text | Live E2E tested |
-| `ai.prompt(message)` | Send a text chat message | Implemented; Mock tests pass; not in current live E2E set |
-| `ai.list_conversations()` | List conversations | Implemented; live verification not claimed |
+| `ai.prompt(message)` | Send a text chat message | REST route live-tested: first request returned 500; retry returned 200 with correct answer; SDK method not separately tested live; cold-start reliability still needs repeat checks |
+| `ai.list_conversations()` | List conversations | Live REST tested; 200 with 41 entries before, 42 after test chat |
 | `ai.new_conversation()` | Start a new conversation | Implemented; live verification not claimed |
 | `ai.fetch_card_media(media_id)` | Resolve media from Meta's current media-library feed | REST generated-image download flow Live E2E tested; SDK method itself not separately tested live; unit tests use Mocks |
 | `ai.upload_file(file_bytes, filename, mime_type=None)` | Send a generic file to Meta's rupload handler | REST PDF upload plus local-cache download Live E2E tested; SDK method itself not separately tested live; requires access token; other formats not verified |
@@ -157,8 +158,8 @@ See [CHANGES_AND_COOKIES.md](CHANGES_AND_COOKIES.md) for details on cookie expir
 
 | Endpoint | Method | Description | Verification |
 |----------|--------|-------------|--------|
-| `/healthz` | GET | Health check | Implemented; live verification not claimed |
-| `/chat` | POST | Send a text chat message | Implemented; Mock tests pass; not in current live E2E set |
+| `/healthz` | GET | Health check | Live REST tested; HTTP 200 |
+| `/chat` | POST | Send a text chat message | Live REST tested: initial HTTP 500; retry HTTP 200 with correct answer; first-request issue unresolved |
 | `/image` | POST | Generate image from text or reference inputs | Text-to-image and reference-image flows Live E2E tested |
 | `/image/reference` | POST | Generate image from multipart reference file | Reference-image flow Live E2E tested; endpoint tests also use Mocks |
 | `/video` | POST | Text-to-video | Live-tested refusal; returns 503 for this account |
@@ -168,7 +169,7 @@ See [CHANGES_AND_COOKIES.md](CHANGES_AND_COOKIES.md) for details on cookie expir
 | `/upload` | POST | Upload an image to Meta rupload | Implemented; Mock tests pass; requires access token; no separate live E2E claim |
 | `/files` | POST | Upload a generic file to Meta rupload | Synthetic PDF Live E2E tested; 10 MiB API cap; requires access token |
 | `/files/{file_id}` | GET | Download this API's locally cached upload original (24 hours) | Synthetic PDF returned byte-for-byte in the same Live E2E flow; not a Meta fetch-back |
-| `/conversations` | GET | List conversations | Implemented; live verification not claimed |
+| `/conversations` | GET | List conversations | Live REST tested; HTTP 200 with 41 then 42 entries |
 | `/conversations/{conversation_id}/documents` | GET | List documents Meta AI generated in a conversation | Live E2E tested for generated PDF |
 | `/conversations/{conversation_id}/documents/{index}/download` | GET | Export a generated document as its original PDF | Live E2E tested; PDF artifacts only |
 | `/media` | POST | Resolve a media-library item, CDN filename ID, or conversation ID | Used in Live E2E generated-image download flow |

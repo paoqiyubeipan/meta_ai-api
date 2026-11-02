@@ -386,13 +386,15 @@ async def chat(req: ChatRequest, _=Depends(verify_api_key)):
     start = time.time()
     try:
         client = client_manager.get_client()
-        result = client.prompt(
-            req.message,
-            stream=req.stream,
-            new_conversation=req.new_conversation,
-            thinking_mode=req.thinking_mode,
-            media_ids=req.media_ids,
-            attachment_metadata=req.attachment_metadata,
+        result = await run_in_threadpool(
+            lambda: client.prompt(
+                req.message,
+                stream=req.stream,
+                new_conversation=req.new_conversation,
+                thinking_mode=req.thinking_mode,
+                media_ids=req.media_ids,
+                attachment_metadata=req.attachment_metadata,
+            )
         )
         return {
             "success": True,
@@ -650,7 +652,7 @@ async def list_conversations(_=Depends(verify_api_key)):
     """List all conversations."""
     try:
         client = client_manager.get_client()
-        convs = client.list_conversations()
+        convs = await run_in_threadpool(client.list_conversations)
         return {"success": True, "conversations": convs}
     except Exception as e:
         handle_error(e, 10)
